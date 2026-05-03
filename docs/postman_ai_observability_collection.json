@@ -1,0 +1,60 @@
+{
+  "info": {
+    "name": "Nexora Backend AI Observability",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "AI Health",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/ai/health",
+          "host": ["{{base_url}}"],
+          "path": ["ai", "health"]
+        }
+      }
+    },
+    {
+      "name": "AI Run Now (C01)",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{base_url}}/ai/run-now?community_id=C01",
+          "host": ["{{base_url}}"],
+          "path": ["ai", "run-now"],
+          "query": [{"key": "community_id", "value": "C01"}]
+        }
+      }
+    },
+    {
+      "name": "AI Last Result (C01)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/ai/last-result?community_id=C01",
+          "host": ["{{base_url}}"],
+          "path": ["ai", "last-result"],
+          "query": [{"key": "community_id", "value": "C01"}]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8100"
+    }
+  ]
+}
