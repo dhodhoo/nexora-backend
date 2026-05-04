@@ -15,11 +15,45 @@ class MQTTConsumer:
             self.client.username_pw_set(settings.mqtt_username, settings.mqtt_password)
 
         self.client.on_connect = self.on_connect
+        self.client.on_subscribe = self.on_subscribe
+        self.client.on_disconnect = self.on_disconnect
         self.client.on_message = self.on_message
+        self._pending_subscribe_topics: dict[int, str] = {}
 
     def on_connect(self, client, userdata, flags, reason_code, properties=None):
-        client.subscribe(settings.mqtt_topic_pattern)
-        print(f"[MQTT] subscribed topic={settings.mqtt_topic_pattern}")
+        if reason_code != 0:
+            print(f"[MQTT][CONNECT_FAILED] reason={reason_code}")
+            return
+
+        topics = self._resolve_topics()
+        for topic in topics:
+            result, mid = client.subscribe(topic)
+            self._pending_subscribe_topics[mid] = topic
+            print(f"[MQTT][SUBSCRIBE_SENT] topic={topic} subscribe_result={result} mid={mid}")
+
+    def on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        topic = self._pending_subscribe_topics.pop(mid, "unknown")
+        if not reason_codes:
+            print(f"[MQTT][SUBACK] topic={topic} mid={mid} reason_codes=[]")
+            return
+
+        rejected = [str(code) for code in reason_codes if str(code).lower() in {"failure", "not authorized"}]
+        if rejected:
+            print(f"[MQTT][SUBACK_FAILED] topic={topic} mid={mid} reason_codes={[str(code) for code in reason_codes]}")
+            return
+
+        print(f"[MQTT][SUBACK_OK] topic={topic} mid={mid} reason_codes={[str(code) for code in reason_codes]}")
+
+    def on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None):
+        print(f"[MQTT][DISCONNECTED] reason={reason_code}")
+
+    @staticmethod
+    def _resolve_topics() -> list[str]:
+        if settings.mqtt_topics:
+            topics = [t.strip() for t in settings.mqtt_topics.split(",") if t.strip()]
+            if topics:
+                return topics
+        return [settings.mqtt_topic_pattern]
 
     def on_message(self, client, userdata, msg):
         try:

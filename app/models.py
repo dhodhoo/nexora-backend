@@ -1,9 +1,18 @@
 from datetime import datetime
+from typing import Optional
 from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 from app.utils.time import utc_now
+
+
+class Community(Base):
+    __tablename__ = "communities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    community_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
 
 class Unit(Base):

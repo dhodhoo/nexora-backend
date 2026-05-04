@@ -47,6 +47,46 @@ class UnitVaUpdateRequest(BaseModel):
     va: int = Field(gt=0)
 
 
+class CommunityCreateRequest(BaseModel):
+    community_id: str = Field(min_length=1, max_length=32)
+    name: Optional[str] = Field(default=None, max_length=128)
+
+
+class CommunityUpdateRequest(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=128)
+
+
+class CommunityResponse(BaseModel):
+    community_id: str
+    name: Optional[str] = None
+
+
+class UnitCreateRequest(BaseModel):
+    unit_id: str = Field(min_length=1, max_length=32)
+    va: int = Field(gt=0)
+
+
+class UnitUpdateRequest(BaseModel):
+    va: int = Field(gt=0)
+
+
+class UnitCrudResponse(BaseModel):
+    community_id: str
+    unit_id: str
+    va: int
+
+
+class CommunityUnitSummaryItem(BaseModel):
+    community_id: str
+    unit_id: str
+    va: int
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
 class AnalyzeDeviceSchedule(BaseModel):
     hours: Optional[List[int]] = None
 

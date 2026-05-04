@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import DeadLetter, Device, DeviceStateHistory, EnergyReading, Unit
+from app.models import Community, DeadLetter, Device, DeviceStateHistory, EnergyReading, Unit
 from app.schemas import ConsumptionEvent
 from app.services.tariff import TariffService
 from app.utils.time import assume_utc, utc_now
@@ -25,6 +25,12 @@ class IngestionService:
                 raise ValueError("Either kwh or power_watt must be provided")
             kwh = event.kwh if event.kwh is not None else event.power_watt / 1000.0
             timestamp = IngestionService._to_utc(event.timestamp)
+
+            community = db.execute(select(Community).where(Community.community_id == event.community_id)).scalar_one_or_none()
+            if not community:
+                community = Community(community_id=event.community_id, name=event.community_id)
+                db.add(community)
+                db.flush()
 
             unit = db.execute(
                 select(Unit).where(and_(Unit.community_id == event.community_id, Unit.unit_id == event.unit_id))

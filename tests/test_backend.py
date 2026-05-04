@@ -2,17 +2,43 @@ import os
 import sys
 from datetime import datetime, timezone
 
+import psycopg
+
 sys.path.insert(0, os.path.abspath("."))
 
-os.environ["DATABASE_URL"] = "sqlite:///./test_nexora.db"
 os.environ["ENABLE_MQTT"] = "false"
 os.environ["AI_ENABLED"] = "true"
+
+TEST_DB_HOST = os.getenv("TEST_DB_HOST", "localhost")
+TEST_DB_PORT = int(os.getenv("TEST_DB_PORT", "5432"))
+TEST_DB_USER = os.getenv("TEST_DB_USER", "nexora")
+TEST_DB_PASSWORD = os.getenv("TEST_DB_PASSWORD", "password-nexora")
+TEST_DB_NAME = os.getenv("TEST_DB_NAME", "nexora_test")
+
+
+def _ensure_test_database():
+    admin_dsn = (
+        f"host={TEST_DB_HOST} port={TEST_DB_PORT} dbname=postgres "
+        f"user={TEST_DB_USER} password={TEST_DB_PASSWORD}"
+    )
+    with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (TEST_DB_NAME,))
+            exists = cur.fetchone()
+            if not exists:
+                cur.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
+
+
+_ensure_test_database()
+os.environ["DATABASE_URL"] = (
+    f"postgresql+psycopg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
+)
 
 from fastapi.testclient import TestClient
 
 from app.database import Base, SessionLocal, engine
 from app.main import app
-from app.models import Unit
+from app.models import Community, Unit
 from app.services.ai_integration import ai_orchestrator
 from app.services.ingestion import IngestionService
 
@@ -31,6 +57,8 @@ def test_health_contract():
 
 def test_ingestion_and_unit_summary():
     db = SessionLocal()
+    community = Community(community_id="C01", name="Community 01")
+    db.add(community)
     unit = Unit(community_id="C01", unit_id="U01", va=1300)
     db.add(unit)
     db.commit()
@@ -99,3 +127,36 @@ def test_update_unit_va():
         assert body["community_id"] == "C01"
         assert body["unit_id"] == "U01"
         assert body["va"] == 2200
+
+
+def test_community_and_unit_crud_minimum():
+    with TestClient(app) as client:
+        created = client.post("/communities", json={"community_id": "C02", "name": "Community 02"})
+        assert created.status_code == 200
+        assert created.json()["community_id"] == "C02"
+
+        listed = client.get("/communities")
+        assert listed.status_code == 200
+        assert any(c["community_id"] == "C02" for c in listed.json())
+
+        unit_create = client.post("/communities/C02/units", json={"unit_id": "U99", "va": 1300})
+        assert unit_create.status_code == 200
+        assert unit_create.json()["unit_id"] == "U99"
+
+        unit_update = client.put("/communities/C02/units/U99", json={"va": 2200})
+        assert unit_update.status_code == 200
+        assert unit_update.json()["va"] == 2200
+
+        unit_delete = client.delete("/communities/C02/units/U99")
+        assert unit_delete.status_code == 200
+
+        community_delete = client.delete("/communities/C02")
+        assert community_delete.status_code == 200
+
+
+def test_community_units_summary():
+    with TestClient(app) as client:
+        res = client.get("/communities/C01/units-summary")
+        assert res.status_code == 200
+        rows = res.json()
+        assert any(r["unit_id"] == "U01" for r in rows)

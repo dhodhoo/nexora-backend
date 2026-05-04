@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     mqtt_username: Optional[str] = None
     mqtt_password: Optional[str] = None
     mqtt_topic_pattern: str = "energy/+/+/consumption"
+    mqtt_topics: Optional[str] = None
     enable_mqtt: bool = True
     emission_factor_kg_co2e_per_kwh: float = 0.85
 
