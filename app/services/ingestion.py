@@ -9,6 +9,7 @@ from app.config import settings
 from app.models import Community, DeadLetter, Device, DeviceStateHistory, EnergyReading, Unit
 from app.schemas import ConsumptionEvent
 from app.services.tariff import TariffService
+from app.services.realtime_ws import dashboard_ws_manager
 from app.utils.time import assume_utc, utc_now
 
 
@@ -81,6 +82,10 @@ class IngestionService:
             db.add(reading)
             db.commit()
             print(f"[INGEST][RECEIVED] topic={topic} unit={event.unit_id} device={event.device_id}")
+            try:
+                dashboard_ws_manager.notify_community_update(event.community_id)
+            except Exception as notify_exc:
+                print(f"[WS][NOTIFY_FAILED] community={event.community_id} reason={notify_exc}")
         except IntegrityError:
             db.rollback()
             print(f"[INGEST][DUPLICATE] topic={topic}")

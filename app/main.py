@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -8,6 +9,7 @@ from app.api.routes import router
 from app.database import SessionLocal
 from app.services.ai_integration import ai_orchestrator
 from app.services.mqtt_consumer import MQTTConsumer
+from app.services.realtime_ws import dashboard_ws_manager
 from app.services.tariff import TariffService
 from app.config import settings
 
@@ -16,6 +18,8 @@ consumer = MQTTConsumer()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    dashboard_ws_manager.bind_loop(asyncio.get_running_loop())
+
     db = SessionLocal()
     TariffService.seed_defaults(db)
     db.close()

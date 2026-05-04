@@ -173,6 +173,43 @@ Base URL:
 ]
 ```
 
+### Community Dashboard Bundle (single call FE)
+- `GET /communities/{community_id}/dashboard`
+- Contoh: `GET /communities/C01/dashboard`
+```json
+{
+  "community": {
+    "community_id": "C01",
+    "name": "Community 01",
+    "total_units": 4,
+    "total_kwh": 12.34,
+    "estimated_cost": 17819.0,
+    "estimated_emission_kg_co2e": 10.489,
+    "last_timestamp": "2026-05-04T10:00:00",
+    "is_fresh": true
+  },
+  "units_summary": [],
+  "load_curve": [],
+  "peak_risk": {
+    "community_id": "C01",
+    "peak_hour": null,
+    "peak_kwh": 0.0,
+    "risk_level": "normal"
+  },
+  "ai_status": {
+    "community_id": "C01",
+    "exists": false,
+    "healthy": true,
+    "last_run_at": null,
+    "last_success_at": null,
+    "stale": true,
+    "error": "",
+    "source": "unknown"
+  },
+  "generated_at": "2026-05-04T10:00:00+00:00"
+}
+```
+
 ### Community CRUD (minimum)
 - `GET /communities`
 - `POST /communities`
@@ -188,6 +225,15 @@ Contoh create:
 }
 ```
 
+Contoh list advanced:
+`GET /communities?offset=0&limit=20&q=C0&sort_by=community_id&sort_order=asc`
+```json
+{
+  "items":[{"community_id":"C01","name":"Community 01"}],
+  "meta":{"total":1,"offset":0,"limit":20,"has_next":false}
+}
+```
+
 ### Unit CRUD (minimum)
 - `GET /communities/{community_id}/units`
 - `POST /communities/{community_id}/units`
@@ -200,6 +246,29 @@ Contoh create unit:
 {
   "unit_id":"U05",
   "va":2200
+}
+```
+
+Contoh list advanced:
+`GET /communities/C01/units?offset=0&limit=20&q=U&va_min=1300&sort_by=va&sort_order=desc`
+```json
+{
+  "items":[{"community_id":"C01","unit_id":"U01","va":2200}],
+  "meta":{"total":1,"offset":0,"limit":20,"has_next":false}
+}
+```
+
+### Bulk Delete Units
+- `POST /communities/{community_id}/units/bulk-delete`
+```json
+{"unit_ids":["U05","U06","U404"]}
+```
+```json
+{
+  "community_id":"C01",
+  "requested_count":3,
+  "deleted_count":2,
+  "not_found_unit_ids":["U404"]
 }
 ```
 
@@ -247,6 +316,73 @@ Jika belum ada snapshot komunitas, sekarang return 404 (bukan 500).
 }
 ```
 
+### AI Recommendations (FE-ready)
+- `GET /communities/{community_id}/ai-recommendations`
+```json
+{
+  "community_id":"C01",
+  "exists":true,
+  "analyzed_at":"2026-05-04T10:00:00+00:00",
+  "status":"success",
+  "stale":false,
+  "source":"scheduler",
+  "recommendations":[
+    {
+      "unit_id":"U01",
+      "device":"ac",
+      "action":"turn_off",
+      "saving":1000.5,
+      "co2_reduction":0.25,
+      "estimated_reduction_kwh":0.3,
+      "reasons":["outside schedule"]
+    }
+  ]
+}
+```
+
+### AI Status (ringan untuk FE indicator)
+- `GET /ai/status?community_id=C01`
+```json
+{
+  "community_id":"C01",
+  "exists":true,
+  "healthy":true,
+  "last_run_at":"2026-05-04T10:00:00+00:00",
+  "last_success_at":"2026-05-04T10:00:00+00:00",
+  "stale":false,
+  "error":"",
+  "source":"scheduler"
+}
+```
+
+### Ops Ingestion Status
+- `GET /ops/ingestion-status`
+```json
+{
+  "mqtt":{"enabled":true,"host":"broker-nexora.kumalabs.tech","port":1883},
+  "totals":{"energy_readings_count":120,"dead_letters_count":2,"communities_with_data":1},
+  "latest":{"last_ingestion_at":"2026-05-04T10:00:00","last_dead_letter_at":"2026-05-04T09:58:00"},
+  "per_community":[{"community_id":"C01","readings_count":120,"last_ingestion_at":"2026-05-04T10:00:00"}]
+}
+```
+
+### Ops Dead Letters
+- `GET /ops/dead-letters?offset=0&limit=20&topic=energy/C01/U01/consumption&reason_q=kwh&sort_by=created_at&sort_order=desc`
+```json
+{
+  "items": [
+    {
+      "id": 10,
+      "topic": "energy/C01/U01/consumption",
+      "reason": "Either kwh or power_watt must be provided",
+      "raw_payload": "{...}",
+      "created_at": "2026-05-04T10:01:00"
+    }
+  ],
+  "meta":{"total":2,"offset":0,"limit":20,"has_next":false}
+}
+```
+
 ## 6) Contoh Flow Testing End-to-End
 
 1. Nyalakan backend docker.
@@ -259,6 +395,42 @@ Jika belum ada snapshot komunitas, sekarang return 404 (bukan 500).
 - `POST /ai/run-now?community_id=C01`
 6. Cek hasil AI:
 - `GET /ai/last-result?community_id=C01`
+
+## 6.1) Rekomendasi FE Call Order (minimal)
+
+1. Connect realtime stream:
+- `ws://127.0.0.1:8100/ws/communities/{community_id}/dashboard`
+2. Gunakan HTTP `GET /communities/{community_id}/dashboard` sebagai initial/fallback.
+3. `GET /communities/{community_id}/ai-recommendations` untuk panel rekomendasi.
+4. Gunakan endpoint granular hanya saat perlu detail tambahan:
+- `/units/{id}/devices`
+- `/communities/{id}/units-summary`
+
+## 6.2) WebSocket Realtime v1
+
+Endpoint:
+- `WS /ws/communities/{community_id}/dashboard`
+
+Kontrak message:
+```json
+{
+  "type": "dashboard_snapshot",
+  "community_id": "C01",
+  "data": {
+    "community": {},
+    "units_summary": [],
+    "load_curve": [],
+    "peak_risk": {},
+    "ai_status": {},
+    "generated_at": "2026-05-04T10:00:00+00:00"
+  }
+}
+```
+
+Behavior:
+- Saat connect: server langsung kirim snapshot awal.
+- Saat ada ingestion event baru untuk community tersebut: server broadcast snapshot terbaru.
+- Jika WS disconnect: FE fallback ke polling endpoint HTTP dashboard.
 
 ## 7) Mapping ke PRD (Status)
 

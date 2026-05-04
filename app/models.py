@@ -91,6 +91,7 @@ class AIAnalysisResult(Base):
     analyzed_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     status: Mapped[str] = mapped_column(String(16), index=True)
     stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(16), default="unknown", index=True)
     payload: Mapped[dict] = mapped_column(JSON)
     result: Mapped[dict] = mapped_column(JSON)
     error: Mapped[str] = mapped_column(String, default="")

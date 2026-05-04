@@ -7,7 +7,7 @@ import psycopg
 sys.path.insert(0, os.path.abspath("."))
 
 os.environ["ENABLE_MQTT"] = "false"
-os.environ["AI_ENABLED"] = "true"
+os.environ["AI_ENABLED"] = "false"
 
 TEST_DB_HOST = os.getenv("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.getenv("TEST_DB_PORT", "5432"))
@@ -137,7 +137,7 @@ def test_community_and_unit_crud_minimum():
 
         listed = client.get("/communities")
         assert listed.status_code == 200
-        assert any(c["community_id"] == "C02" for c in listed.json())
+        assert any(c["community_id"] == "C02" for c in listed.json()["items"])
 
         unit_create = client.post("/communities/C02/units", json={"unit_id": "U99", "va": 1300})
         assert unit_create.status_code == 200
@@ -160,3 +160,207 @@ def test_community_units_summary():
         assert res.status_code == 200
         rows = res.json()
         assert any(r["unit_id"] == "U01" for r in rows)
+
+
+def test_advanced_list_communities_contract_and_filter():
+    with TestClient(app) as client:
+        res = client.get("/communities", params={"offset": 0, "limit": 10, "q": "C0", "sort_by": "community_id", "sort_order": "asc"})
+        assert res.status_code == 200
+        body = res.json()
+        assert "items" in body and "meta" in body
+        assert {"total", "offset", "limit", "has_next"}.issubset(set(body["meta"].keys()))
+
+
+def test_advanced_list_units_contract_filter_sort():
+    with TestClient(app) as client:
+        res = client.get(
+            "/communities/C01/units",
+            params={"offset": 0, "limit": 10, "q": "U0", "sort_by": "va", "sort_order": "desc"},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert "items" in body and "meta" in body
+        assert {"total", "offset", "limit", "has_next"}.issubset(set(body["meta"].keys()))
+
+
+def test_bulk_delete_units_mixed_found_and_not_found():
+    with TestClient(app) as client:
+        client.post("/communities/C01/units", json={"unit_id": "U88", "va": 1300})
+        client.post("/communities/C01/units", json={"unit_id": "U89", "va": 1300})
+
+        res = client.post("/communities/C01/units/bulk-delete", json={"unit_ids": ["U88", "U89", "U404"]})
+        assert res.status_code == 200
+        body = res.json()
+        assert body["requested_count"] == 3
+        assert body["deleted_count"] == 2
+        assert "U404" in body["not_found_unit_ids"]
+
+
+def test_ai_status_contract():
+    ai_orchestrator.client.health = lambda: {"status": "ok"}
+    with TestClient(app) as client:
+        res = client.get("/ai/status", params={"community_id": "C01"})
+        assert res.status_code == 200
+        body = res.json()
+        assert body["community_id"] == "C01"
+        assert "exists" in body
+        assert "healthy" in body
+        assert "last_run_at" in body
+        assert "last_success_at" in body
+        assert "stale" in body
+        assert "error" in body
+        assert "source" in body
+
+
+def test_dashboard_bundle_contract():
+    ai_orchestrator.client.health = lambda: {"status": "ok"}
+    with TestClient(app) as client:
+        res = client.get("/communities/C01/dashboard")
+        assert res.status_code == 200
+        body = res.json()
+        assert "community" in body
+        assert "units_summary" in body
+        assert "load_curve" in body
+        assert "peak_risk" in body
+        assert "ai_status" in body
+        assert "generated_at" in body
+        assert body["community"]["community_id"] == "C01"
+
+
+def test_dashboard_bundle_community_not_found():
+    with TestClient(app) as client:
+        res = client.get("/communities/UNKNOWN/dashboard")
+        assert res.status_code == 404
+
+
+def test_ws_dashboard_initial_snapshot():
+    db = SessionLocal()
+    exists = db.query(Community).filter(Community.community_id == "C01").first()
+    if not exists:
+        db.add(Community(community_id="C01", name="Community 01"))
+    unit_exists = db.query(Unit).filter(Unit.community_id == "C01", Unit.unit_id == "U01").first()
+    if not unit_exists:
+        db.add(Unit(community_id="C01", unit_id="U01", va=1300))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/communities/C01/dashboard") as ws:
+            msg = ws.receive_json()
+            assert msg["type"] == "dashboard_snapshot"
+            assert msg["community_id"] == "C01"
+            assert "data" in msg
+            assert msg["data"]["community"]["community_id"] == "C01"
+
+
+def test_ws_dashboard_realtime_update():
+    db = SessionLocal()
+    exists = db.query(Community).filter(Community.community_id == "C01").first()
+    if not exists:
+        db.add(Community(community_id="C01", name="Community 01"))
+    unit_exists = db.query(Unit).filter(Unit.community_id == "C01", Unit.unit_id == "U01").first()
+    if not unit_exists:
+        db.add(Unit(community_id="C01", unit_id="U01", va=1300))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/communities/C01/dashboard") as ws:
+            # Initial snapshot
+            _ = ws.receive_json()
+
+            db = SessionLocal()
+            payload = {
+                "community_id": "C01",
+                "unit_id": "U01",
+                "device_id": "lamp",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "kwh": 0.7,
+                "controllable": True,
+            }
+            IngestionService.ingest_event(db, payload, "energy/C01/U01/consumption")
+            db.close()
+
+            msg = ws.receive_json()
+            assert msg["type"] == "dashboard_snapshot"
+            assert msg["community_id"] == "C01"
+
+
+def test_ai_recommendations_contract_exists_false():
+    with TestClient(app) as client:
+        res = client.get("/communities/UNKNOWN/ai-recommendations")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["community_id"] == "UNKNOWN"
+        assert body["exists"] is False
+        assert body["recommendations"] == []
+
+
+def test_ai_recommendations_contract_exists_true():
+    ai_orchestrator.client.analyze = lambda payload: {
+        "result": {
+            "recommendations": [
+                {
+                    "unit_id": "U01",
+                    "device": "ac",
+                    "action": "turn_off",
+                    "saving": 1000.5,
+                    "co2_reduction": 0.25,
+                    "estimated_reduction_kwh": 0.3,
+                    "reasons": ["outside schedule"],
+                }
+            ]
+        }
+    }
+    with TestClient(app) as client:
+        run = client.post("/ai/run-now", params={"community_id": "C01"})
+        assert run.status_code == 200
+        res = client.get("/communities/C01/ai-recommendations")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["exists"] is True
+        assert isinstance(body["recommendations"], list)
+        assert body["recommendations"][0]["unit_id"] == "U01"
+
+
+def test_ops_ingestion_status_contract():
+    with TestClient(app) as client:
+        res = client.get("/ops/ingestion-status")
+        assert res.status_code == 200
+        body = res.json()
+        assert "mqtt" in body
+        assert "totals" in body
+        assert "latest" in body
+        assert "per_community" in body
+        assert "energy_readings_count" in body["totals"]
+        assert "dead_letters_count" in body["totals"]
+
+
+def test_ops_dead_letters_contract_and_limit():
+    # Insert one invalid event to produce dead letter.
+    db = SessionLocal()
+    invalid_payload = {
+        "community_id": "C01",
+        "unit_id": "U01",
+        "device_id": "ac",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "controllable": True,
+    }
+    IngestionService.ingest_event(db, invalid_payload, "energy/C01/U01/consumption")
+    db.close()
+
+    with TestClient(app) as client:
+        res = client.get("/ops/dead-letters", params={"offset": 0, "limit": 10, "sort_by": "created_at", "sort_order": "desc"})
+        assert res.status_code == 200
+        body = res.json()
+        assert "meta" in body
+        assert "items" in body
+        assert isinstance(body["items"], list)
+        assert {"total", "offset", "limit", "has_next"}.issubset(set(body["meta"].keys()))
+        if body["items"]:
+            item = body["items"][0]
+            assert "id" in item
+            assert "topic" in item
+            assert "reason" in item
+            assert "raw_payload" in item
+            assert "created_at" in item

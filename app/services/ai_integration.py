@@ -1,5 +1,4 @@
 import threading
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -124,7 +123,7 @@ class AIOrchestrator:
 
         return payloads
 
-    def run_once_for_community(self, community_id: str) -> Dict[str, Any]:
+    def run_once_for_community(self, community_id: str, source: str = "manual") -> Dict[str, Any]:
         db = SessionLocal()
         try:
             payloads = [p for p in self.build_snapshot_payloads(db) if p["community_id"] == community_id]
@@ -138,6 +137,7 @@ class AIOrchestrator:
                     community_id=community_id,
                     status="success",
                     stale=False,
+                    source=source,
                     payload=payload,
                     result=result,
                     error="",
@@ -156,6 +156,7 @@ class AIOrchestrator:
                     community_id=community_id,
                     status="failed",
                     stale=True,
+                    source=source,
                     payload=payload,
                     result=(last_ok.result if last_ok else {}),
                     error=str(exc),
@@ -172,7 +173,7 @@ class AIOrchestrator:
         finally:
             db.close()
 
-    def run_once_all(self) -> Dict[str, Any]:
+    def run_once_all(self, source: str = "manual") -> Dict[str, Any]:
         db = SessionLocal()
         try:
             payloads = self.build_snapshot_payloads(db)
@@ -180,7 +181,7 @@ class AIOrchestrator:
         finally:
             db.close()
 
-        results = [self.run_once_for_community(cid) for cid in communities]
+        results = [self.run_once_for_community(cid, source=source) for cid in communities]
         return {"status": "ok", "communities": results, "count": len(results)}
 
     def get_last_result(self, community_id: str) -> Dict[str, Any]:
@@ -200,7 +201,52 @@ class AIOrchestrator:
                 "status": row.status,
                 "stale": row.stale,
                 "error": row.error,
+                "source": row.source,
                 "result": row.result,
+            }
+        finally:
+            db.close()
+
+    def get_status(self, community_id: str) -> Dict[str, Any]:
+        db = SessionLocal()
+        try:
+            last_row = db.execute(
+                select(AIAnalysisResult)
+                .where(AIAnalysisResult.community_id == community_id)
+                .order_by(desc(AIAnalysisResult.analyzed_at))
+            ).scalars().first()
+            last_success = db.execute(
+                select(AIAnalysisResult)
+                .where(and_(AIAnalysisResult.community_id == community_id, AIAnalysisResult.status == "success"))
+                .order_by(desc(AIAnalysisResult.analyzed_at))
+            ).scalars().first()
+
+            try:
+                healthy = bool(self.client.health().get("status") == "ok")
+            except Exception:
+                healthy = False
+
+            if not last_row:
+                return {
+                    "community_id": community_id,
+                    "exists": False,
+                    "healthy": healthy,
+                    "last_run_at": None,
+                    "last_success_at": None,
+                    "stale": True,
+                    "error": "",
+                    "source": "unknown",
+                }
+
+            return {
+                "community_id": community_id,
+                "exists": True,
+                "healthy": healthy,
+                "last_run_at": last_row.analyzed_at.isoformat(),
+                "last_success_at": last_success.analyzed_at.isoformat() if last_success else None,
+                "stale": bool(last_row.stale),
+                "error": last_row.error or "",
+                "source": last_row.source or "unknown",
             }
         finally:
             db.close()
@@ -215,7 +261,7 @@ class AIOrchestrator:
         def _loop():
             while not self._stop.is_set():
                 try:
-                    self.run_once_all()
+                    self.run_once_all(source="scheduler")
                 except Exception as exc:
                     print(f"[AI-SCHEDULER][ERROR] {exc}")
                 self._stop.wait(settings.ai_scheduler_interval_seconds)
