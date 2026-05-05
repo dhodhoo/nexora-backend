@@ -1188,14 +1188,79 @@ Response `200`:
 - Auth: Protected (admin/coordinator/building_manager/resident pada scope unit yang diizinkan).
 - Body menerima `qty` (opsional, default `1`, minimal `1`).
 
+Body:
+```json
+{
+  "device_id": "ac-main",
+  "qty": 2,
+  "controllable": true,
+  "schedules": [
+    {
+      "hours": [9, 10, 11, 12, 13, 14, 15, 16, 17]
+    }
+  ]
+}
+```
+
+Response `200`:
+```json
+{
+  "device_id": "ac-main",
+  "qty": 2,
+  "controllable": true,
+  "schedules": [
+    {
+      "hours": [9, 10, 11, 12, 13, 14, 15, 16, 17]
+    }
+  ]
+}
+```
+
 #### `PUT /units/{unit_id}/devices/{device_id}?community_id={community_id}`
 - Tujuan: update metadata device unit.
 - Auth: Protected (scope role-based).
 - Dapat update `qty` (`>=1`) selain metadata lain.
 
+Body:
+```json
+{
+  "qty": 3,
+  "controllable": true,
+  "schedules": [
+    {
+      "hours": [18, 19, 20, 21, 22]
+    }
+  ]
+}
+```
+
+Response `200`:
+```json
+{
+  "device_id": "ac-main",
+  "qty": 3,
+  "controllable": true,
+  "schedules": [
+    {
+      "hours": [18, 19, 20, 21, 22]
+    }
+  ]
+}
+```
+
 #### `DELETE /units/{unit_id}/devices/{device_id}?community_id={community_id}`
 - Tujuan: hapus device dari unit.
 - Auth: Protected (scope role-based).
+- Body: tidak ada.
+
+Response `200`:
+```json
+{
+  "status": "deleted",
+  "unit_id": "U01",
+  "device_id": "ac-main"
+}
+```
 
 #### `POST /units/{unit_id}/devices/{device_id}/control?community_id={community_id}`
 - Tujuan: kontrol device nyata (`action=on|off`) dan publish command ke MQTT.
