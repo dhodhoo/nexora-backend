@@ -18,6 +18,7 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
 1. `GET /communities/{community_id}/simulations`
 2. `GET /communities/{community_id}/dashboard`
 3. `GET /communities/{community_id}/ai-recommendations`
+4. `GET /units/{unit_id}/ai-recommendations?community_id=...`
 4. `WS /ws/communities/{community_id}/dashboard`
 
 ### C. Management Views
@@ -58,12 +59,23 @@ Field wajib:
 - `load_curve`
 - `peak_risk`
 - `ai_status`
+- `unit_ai_recommendations`
 - `include_simulation_used`
 - `generated_at`
 
 ### `/communities/{id}/ai-recommendations`
 Field wajib:
 - `community_id`
+- `exists`
+- `status`
+- `stale`
+- `source`
+- `recommendations[]`
+
+### `/units/{unit_id}/ai-recommendations`
+Field wajib:
+- `community_id`
+- `unit_id`
 - `exists`
 - `status`
 - `stale`
@@ -99,6 +111,7 @@ Field wajib:
   - dashboard tetap jalan, cek `ai_status.stale=true` dan `ai_status.error`.
 - Jika belum ada hasil AI:
   - `ai-recommendations` tetap `200` dengan `exists=false` dan `recommendations=[]`.
+  - `unit ai-recommendations` juga `200` dengan `exists=false` dan `recommendations=[]`.
 - Jika WS putus:
   - FE fallback polling `GET /communities/{id}/dashboard`.
 - Simulation mode:

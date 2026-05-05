@@ -132,6 +132,7 @@ class DashboardResponse(BaseModel):
     load_curve: List[Dict[str, Any]]
     peak_risk: PeakRiskResponse
     ai_status: AIStatusResponse
+    unit_ai_recommendations: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
     include_simulation_used: bool = False
     generated_at: datetime
 
@@ -148,6 +149,17 @@ class AIRecommendationItem(BaseModel):
 
 class AIRecommendationsResponse(BaseModel):
     community_id: str
+    exists: bool
+    analyzed_at: Optional[str] = None
+    status: Optional[str] = None
+    stale: bool
+    source: str
+    recommendations: List[AIRecommendationItem] = Field(default_factory=list)
+
+
+class UnitAIRecommendationsResponse(BaseModel):
+    community_id: str
+    unit_id: str
     exists: bool
     analyzed_at: Optional[str] = None
     status: Optional[str] = None

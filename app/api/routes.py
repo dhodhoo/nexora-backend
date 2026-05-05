@@ -14,7 +14,6 @@ from app.models import AIAnalysisResult, AuditLog, Building, BuildingConfig, Bui
 from app.schemas import (
     AddCommunityMemberRequest,
     AIRecommendationsResponse,
-    AIRecommendationItem,
     AIStatusResponse,
     AuthMeResponse,
     BroadcastRequest,
@@ -73,6 +72,7 @@ from app.schemas import (
     UnitDevicesListResponse,
     UnitDeviceUpdateRequest,
     UnitCrudResponse,
+    UnitAIRecommendationsResponse,
     UnitsListResponse,
     UnitSummaryResponse,
     UnitUpdateRequest,
@@ -86,6 +86,7 @@ from app.schemas import (
     NotificationsListResponse,
 )
 from app.services.ai_integration import ai_orchestrator
+from app.services.ai_recommendations import get_latest_ai_result, parse_recommendations
 from app.services.auth import AuthService, ensure_building_access, ensure_community_access, get_current_user, require_roles
 from app.services.dashboard import build_dashboard_snapshot, build_load_curve, build_peak_risk, build_units_summary
 from app.services.device_control import publish_device_command
@@ -1675,20 +1676,44 @@ def ai_last_result(community_id: str, current_user: User = Depends(get_current_u
 @router.get("/communities/{community_id}/ai-recommendations", response_model=AIRecommendationsResponse)
 def ai_recommendations(community_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ensure_community_access(community_id, current_user)
-    row = db.execute(select(AIAnalysisResult).where(AIAnalysisResult.community_id == community_id).order_by(desc(AIAnalysisResult.analyzed_at))).scalars().first()
+    row = get_latest_ai_result(db, community_id)
     if not row:
         return AIRecommendationsResponse(community_id=community_id, exists=False, analyzed_at=None, status=None, stale=True, source="unknown", recommendations=[])
-    recs_raw = []
-    if isinstance(row.result, dict):
-        result_payload = row.result.get("result", row.result)
-        if isinstance(result_payload, dict):
-            recs_raw = result_payload.get("recommendations", []) or []
-    recommendations: list[AIRecommendationItem] = []
-    for rec in recs_raw:
-        if isinstance(rec, dict):
-            reasons = rec.get("reasons")
-            recommendations.append(AIRecommendationItem(unit_id=rec.get("unit_id"), device=rec.get("device"), action=rec.get("action"), saving=float(rec["saving"]) if isinstance(rec.get("saving"), (int, float)) else None, co2_reduction=float(rec["co2_reduction"]) if isinstance(rec.get("co2_reduction"), (int, float)) else None, estimated_reduction_kwh=float(rec["estimated_reduction_kwh"]) if isinstance(rec.get("estimated_reduction_kwh"), (int, float)) else None, reasons=[str(x) for x in reasons if isinstance(x, str)] if isinstance(reasons, list) else []))
+    recommendations = parse_recommendations(row)
     return AIRecommendationsResponse(community_id=community_id, exists=True, analyzed_at=row.analyzed_at.isoformat(), status=row.status, stale=bool(row.stale), source=row.source or "unknown", recommendations=recommendations)
+
+
+@router.get("/units/{unit_id}/ai-recommendations", response_model=UnitAIRecommendationsResponse)
+def unit_ai_recommendations(
+    unit_id: str,
+    community_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    unit = _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    row = get_latest_ai_result(db, community_id)
+    if not row:
+        return UnitAIRecommendationsResponse(
+            community_id=community_id,
+            unit_id=unit.unit_id,
+            exists=False,
+            analyzed_at=None,
+            status=None,
+            stale=True,
+            source="unknown",
+            recommendations=[],
+        )
+    recommendations = [item for item in parse_recommendations(row) if item.unit_id == unit_id]
+    return UnitAIRecommendationsResponse(
+        community_id=community_id,
+        unit_id=unit.unit_id,
+        exists=True,
+        analyzed_at=row.analyzed_at.isoformat(),
+        status=row.status,
+        stale=bool(row.stale),
+        source=row.source or "unknown",
+        recommendations=recommendations,
+    )
 
 
 @router.get("/ai/status", response_model=AIStatusResponse)

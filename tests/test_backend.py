@@ -242,6 +242,8 @@ def test_dashboard_bundle_contract():
         assert "load_curve" in body
         assert "peak_risk" in body
         assert "ai_status" in body
+        assert "unit_ai_recommendations" in body
+        assert isinstance(body["unit_ai_recommendations"], dict)
         assert "generated_at" in body
         assert body["community"]["community_id"] == "C01"
 
@@ -347,6 +349,67 @@ def test_ai_recommendations_contract_exists_true():
         assert body["exists"] is True
         assert isinstance(body["recommendations"], list)
         assert body["recommendations"][0]["unit_id"] == "U01"
+
+
+def test_unit_ai_recommendations_contract_exists_false():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "C08").first():
+        db.add(Community(community_id="C08", name="Community 08"))
+    if not db.query(Unit).filter(Unit.community_id == "C08", Unit.unit_id == "U08").first():
+        db.add(Unit(community_id="C08", unit_id="U08", va=1300))
+    db.commit()
+    db.close()
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.get("/units/U08/ai-recommendations", params={"community_id": "C08"}, headers=headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["exists"] is False
+        assert body["recommendations"] == []
+
+
+def test_unit_ai_recommendations_contract_exists_true():
+    ai_orchestrator.client.analyze = lambda payload: {
+        "result": {
+            "recommendations": [
+                {
+                    "unit_id": "U01",
+                    "device": "ac",
+                    "action": "turn_off",
+                    "saving": 1200.0,
+                    "co2_reduction": 0.3,
+                    "estimated_reduction_kwh": 0.4,
+                    "reasons": ["outside schedule"],
+                },
+                {
+                    "unit_id": "U02",
+                    "device": "tv",
+                    "action": "reduce",
+                    "saving": 500.0,
+                    "co2_reduction": 0.1,
+                    "estimated_reduction_kwh": 0.2,
+                    "reasons": ["peak risk"],
+                },
+            ]
+        }
+    }
+    db = SessionLocal()
+    if not db.query(Unit).filter(Unit.community_id == "C01", Unit.unit_id == "U02").first():
+        db.add(Unit(community_id="C01", unit_id="U02", va=1300))
+        db.commit()
+    db.close()
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        run = client.post("/ai/run-now", params={"community_id": "C01"}, headers=headers)
+        assert run.status_code == 200
+        res = client.get("/units/U01/ai-recommendations", params={"community_id": "C01"}, headers=headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["community_id"] == "C01"
+        assert body["unit_id"] == "U01"
+        assert body["exists"] is True
+        assert isinstance(body["recommendations"], list)
+        assert all(item.get("unit_id") == "U01" for item in body["recommendations"])
 
 
 def test_ops_ingestion_status_contract():

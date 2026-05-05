@@ -1056,6 +1056,19 @@ Response `200`:
     "error": "",
     "source": "unknown"
   },
+  "unit_ai_recommendations": {
+    "U01": [
+      {
+        "unit_id": "U01",
+        "device": "ac",
+        "action": "turn_off",
+        "saving": 1000.5,
+        "co2_reduction": 0.25,
+        "estimated_reduction_kwh": 0.3,
+        "reasons": ["outside schedule"]
+      }
+    ]
+  },
   "include_simulation_used": false,
   "generated_at": "2026-05-05T10:00:00+00:00"
 }
@@ -1306,6 +1319,48 @@ Response `200`:
       ]
     }
   ]
+}
+```
+
+#### `GET /units/{unit_id}/ai-recommendations?community_id={community_id}`
+- Tujuan: rekomendasi AI khusus untuk 1 unit.
+- Auth: Protected (scope community + unit access).
+
+Response `200` (ada data):
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "exists": true,
+  "analyzed_at": "2026-05-05T09:00:00+00:00",
+  "status": "success",
+  "stale": false,
+  "source": "manual",
+  "recommendations": [
+    {
+      "unit_id": "U01",
+      "device": "ac",
+      "action": "turn_off",
+      "saving": 1200.0,
+      "co2_reduction": 0.3,
+      "estimated_reduction_kwh": 0.4,
+      "reasons": ["outside schedule"]
+    }
+  ]
+}
+```
+
+Response `200` (belum ada hasil AI):
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "exists": false,
+  "analyzed_at": null,
+  "status": null,
+  "stale": true,
+  "source": "unknown",
+  "recommendations": []
 }
 ```
 

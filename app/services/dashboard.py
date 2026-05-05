@@ -8,6 +8,7 @@ from app.config import settings
 from app.models import Community, EnergyReading, Unit
 from app.schemas import AIStatusResponse, CommunityUnitSummaryItem, DashboardCommunitySummary, DashboardResponse, PeakRiskResponse
 from app.services.ai_integration import ai_orchestrator
+from app.services.ai_recommendations import get_latest_ai_result, parse_recommendations, recommendations_map_by_unit
 from app.utils.time import utc_now
 from app.utils.time import assume_utc
 
@@ -114,6 +115,11 @@ def build_dashboard_snapshot(db: Session, community_id: str, include_simulation:
     load_curve = build_load_curve(db, community_id, include_simulation=include_simulation)
     peak_risk = build_peak_risk(db, community_id, include_simulation=include_simulation)
     ai_status = AIStatusResponse(**ai_orchestrator.get_status(community_id=community_id))
+    ai_result_row = get_latest_ai_result(db, community_id)
+    unit_ai_recommendations = {
+        unit_id: [item.model_dump() for item in items]
+        for unit_id, items in recommendations_map_by_unit(parse_recommendations(ai_result_row)).items()
+    }
 
     total_kwh = float(sum(item.total_kwh for item in units_summary))
     total_cost = float(sum(item.estimated_cost for item in units_summary))
@@ -137,6 +143,7 @@ def build_dashboard_snapshot(db: Session, community_id: str, include_simulation:
         load_curve=load_curve,
         peak_risk=peak_risk,
         ai_status=ai_status,
+        unit_ai_recommendations=unit_ai_recommendations,
         include_simulation_used=include_simulation,
         generated_at=utc_now(),
     )
