@@ -27,8 +27,15 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-nexora}:${POSTGRES_PASSWORD:-nexora}@postgres:5432/${POSTGRES_DB:-nexora}
       - APP_PORT=8100
+      - TEST_DB_HOST=postgres
+      - TEST_DB_PORT=5432
+      - TEST_DB_USER=${POSTGRES_USER:-nexora}
+      - TEST_DB_PASSWORD=${POSTGRES_PASSWORD:-nexora}
+      - TEST_DB_NAME=nexora_test
     ports:
       - "8100:8100"
+    volumes:
+      - ./:/app
     depends_on:
       postgres:
         condition: service_healthy

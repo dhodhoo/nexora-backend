@@ -26,6 +26,22 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
 - Add member: `POST /communities/{community_id}/members`
 - Remove member: `DELETE /communities/{community_id}/members/{user_id}`
 - Units list: `GET /communities/{community_id}/units`
+- Global devices list: `GET /devices`
+- Unit devices CRUD:
+  - `GET /units/{unit_id}/devices?community_id=...`
+  - `POST /units/{unit_id}/devices?community_id=...`
+  - `PUT /units/{unit_id}/devices/{device_id}?community_id=...`
+  - `DELETE /units/{unit_id}/devices/{device_id}?community_id=...`
+- Device control:
+  - `POST /units/{unit_id}/devices/{device_id}/control?community_id=...`
+- Notifications:
+  - `POST /communities/{community_id}/notifications`
+  - `POST /buildings/{building_id}/notifications`
+  - `GET /notifications`
+  - `GET /notifications/{notification_id}`
+- CSV export:
+  - `GET /communities/{community_id}/reports/export?format=csv`
+  - `GET /buildings/{building_id}/reports/export?format=csv`
 
 ### D. Ops & Debug (Admin)
 - `GET /health`

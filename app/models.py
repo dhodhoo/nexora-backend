@@ -86,6 +86,7 @@ class User(Base):
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus, name="user_status"), index=True, default=UserStatus.PENDING)
     community_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     building_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    unit_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
@@ -112,6 +113,19 @@ class Device(Base):
     schedules: Mapped[list] = mapped_column(JSON, nullable=True)
 
     __table_args__ = (UniqueConstraint("unit_id", "device_id", name="uq_device_unit_device"),)
+
+
+class DeviceCatalog(Base):
+    __tablename__ = "device_catalog"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    device_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(128))
+    default_power_watt: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    controllable: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
 
 
 class DeviceStateHistory(Base):
@@ -172,6 +186,48 @@ class AIAnalysisResult(Base):
     payload: Mapped[dict] = mapped_column(JSON)
     result: Mapped[dict] = mapped_column(JSON)
     error: Mapped[str] = mapped_column(String, default="")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    notification_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    scope: Mapped[str] = mapped_column(String(16), index=True)  # community|building
+    community_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    building_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    message: Mapped[str] = mapped_column(String)
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    notification_id: Mapped[str] = mapped_column(String(64), index=True)
+    target_type: Mapped[str] = mapped_column(String(16), index=True)  # user|scope
+    target_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), index=True, default="queued")
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+
+class DeviceCommand(Base):
+    __tablename__ = "device_commands"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    command_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    community_id: Mapped[str] = mapped_column(String(32), index=True)
+    unit_id: Mapped[str] = mapped_column(String(32), index=True)
+    device_id: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(8))  # on|off
+    topic: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(16), index=True, default="sent")
+    error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
 
 class RevokedToken(Base):

@@ -504,6 +504,7 @@ def test_building_manager_scope_access_enforced():
                 "role": "ROLE_BUILDING_MANAGER",
                 "status": "ACTIVE",
                 "building_id": "B01",
+                "unit_id": "U01",
             },
             headers=admin_headers,
         )
@@ -561,6 +562,7 @@ def test_community_members_crud_and_scope():
                 "password": "resident12345",
                 "role": "ROLE_RESIDENT",
                 "status": "ACTIVE",
+                "unit_id": "U01",
             },
             headers=admin_headers,
         )
@@ -586,6 +588,7 @@ def test_community_members_crud_and_scope():
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
                 "community_id": "C03",
+                "unit_id": "U01",
             },
             headers=admin_headers,
         )
@@ -634,6 +637,7 @@ def test_community_members_assign_user_with_building_scope_rejected():
                 "role": "ROLE_BUILDING_MANAGER",
                 "status": "ACTIVE",
                 "building_id": "B05",
+                "unit_id": "U01",
             },
             headers=admin_headers,
         )
@@ -668,6 +672,7 @@ def test_me_dashboard_role_aware_contract():
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
                 "community_id": "C06",
+                "unit_id": "U06",
             },
             headers=admin_headers,
         )
@@ -715,6 +720,7 @@ def test_simulation_toggle_and_status_contract_admin_and_coordinator():
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
                 "community_id": "C07",
+                "unit_id": "U01",
             },
             headers=admin_headers,
         )
@@ -746,6 +752,7 @@ def test_simulation_endpoint_role_restriction():
                 "role": "ROLE_BUILDING_MANAGER",
                 "status": "ACTIVE",
                 "building_id": "B01",
+                "unit_id": "U01",
             },
             headers=admin_headers,
         )
@@ -837,6 +844,7 @@ def test_ai_run_now_rate_limit_for_coordinator():
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
                 "community_id": "CRATE",
+                "unit_id": "URATE",
             },
             headers=headers,
         )
@@ -900,6 +908,7 @@ def test_include_simulation_query_behavior():
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
                 "community_id": "CSIM",
+                "unit_id": "USIM",
             },
             headers=admin_headers,
         )
@@ -926,3 +935,89 @@ def test_include_simulation_query_behavior():
         assert coord_include_true.status_code == 200
         assert coord_include_true.json()["include_simulation_used"] is True
         assert coord_include_true.json()["community"]["total_kwh"] >= admin_default.json()["community"]["total_kwh"]
+
+
+def test_notifications_device_catalog_device_control_and_csv_export():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "C10").first():
+        db.add(Community(community_id="C10", name="Community 10"))
+    if not db.query(Unit).filter(Unit.community_id == "C10", Unit.unit_id == "U10").first():
+        db.add(Unit(community_id="C10", unit_id="U10", va=2200))
+    if not db.query(Building).filter(Building.building_id == "B10").first():
+        db.add(Building(building_id="B10", name="Tower 10"))
+    if not db.query(BuildingUnit).filter(BuildingUnit.building_id == "B10", BuildingUnit.unit_id == "U10").first():
+        db.add(BuildingUnit(building_id="B10", unit_id="U10", is_active=True, metadata_json={}))
+    db.commit()
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "C10",
+            "unit_id": "U10",
+            "device_id": "ac",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kwh": 0.4,
+            "controllable": True,
+        },
+        "energy/C10/U10/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        g_create = client.post(
+            "/devices",
+            json={"device_key": "aircon", "display_name": "Air Conditioner", "default_power_watt": 900, "controllable": True},
+            headers=headers,
+        )
+        assert g_create.status_code in (200, 400)
+
+        g_list = client.get("/devices", headers=headers)
+        assert g_list.status_code == 200
+        assert "items" in g_list.json()
+
+        d_create = client.post(
+            "/units/U10/devices",
+            params={"community_id": "C10"},
+            json={"device_id": "ac-main", "controllable": True, "schedules": [{"start_hour": 18, "end_hour": 22}]},
+            headers=headers,
+        )
+        assert d_create.status_code in (200, 400)
+
+        d_control = client.post(
+            "/units/U10/devices/ac-main/control",
+            params={"community_id": "C10"},
+            json={"action": "on"},
+            headers=headers,
+        )
+        assert d_control.status_code == 200
+        assert d_control.json()["status"] in ("sent", "failed")
+
+        n1 = client.post("/communities/C10/notifications", json={"message": "Test community notif"}, headers=headers)
+        assert n1.status_code == 200
+        n2 = client.post("/buildings/B10/notifications", json={"message": "Test building notif"}, headers=headers)
+        assert n2.status_code == 200
+
+        n_list = client.get("/notifications", headers=headers)
+        assert n_list.status_code == 200
+        assert "items" in n_list.json()
+        if n_list.json()["items"]:
+            notif_id = n_list.json()["items"][0]["notification_id"]
+            n_detail = client.get(f"/notifications/{notif_id}", headers=headers)
+            assert n_detail.status_code == 200
+
+        c_export = client.get(
+            "/communities/C10/reports/export",
+            params={"format": "csv"},
+            headers=headers,
+        )
+        assert c_export.status_code == 200
+        assert "text/csv" in c_export.headers.get("content-type", "")
+
+        b_export = client.get(
+            "/buildings/B10/reports/export",
+            params={"format": "csv"},
+            headers=headers,
+        )
+        assert b_export.status_code == 200
+        assert "text/csv" in b_export.headers.get("content-type", "")

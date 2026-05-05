@@ -101,3 +101,10 @@ Expected message awal:
 - `/ai/health` gagal: AI deploy timeout/down.
 - `403` di community endpoint: scope token tidak cocok.
 - dashboard kosong: ingestion belum masuk untuk community tersebut.
+
+## 8) New Feature Evidence (Notifications, Devices, CSV, Control)
+1. `GET /devices` -> pastikan katalog device global terbaca.
+2. `POST /units/{unit_id}/devices/{device_id}/control?community_id=...` -> status `sent`/`failed` + `command_id` tercatat.
+3. `POST /communities/{id}/notifications` atau `POST /buildings/{id}/notifications` -> dapat `notification_id`.
+4. `GET /notifications` -> notifikasi muncul dengan `deliveries`.
+5. `GET /communities/{id}/reports/export?format=csv` -> response `text/csv` dan file terunduh.

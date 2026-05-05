@@ -193,7 +193,8 @@ Response `200`:
   "role": "ROLE_ADMIN",
   "status": "ACTIVE",
   "community_id": null,
-  "building_id": null
+  "building_id": null,
+  "unit_id": null
 }
 ```
 
@@ -213,7 +214,8 @@ Response `200`:
   },
   "scope": {
     "community_id": "C01",
-    "building_id": null
+    "building_id": null,
+    "unit_id": "U01"
   },
   "widgets": {
     "community_dashboard": {},
@@ -243,7 +245,8 @@ Response `200`:
       "role": "ROLE_ADMIN",
       "status": "ACTIVE",
       "community_id": null,
-      "building_id": null
+      "building_id": null,
+      "unit_id": null
     }
   ],
   "meta": {
@@ -269,7 +272,8 @@ Body:
   "role": "ROLE_COORDINATOR",
   "status": "ACTIVE",
   "community_id": "C01",
-  "building_id": null
+  "building_id": null,
+  "unit_id": "U01"
 }
 ```
 
@@ -629,9 +633,17 @@ Response `200`:
   "status": "queued",
   "scope": "building",
   "building_id": "B01",
-  "message": "Mohon kurangi beban puncak pukul 19:00-21:00"
+  "notification_id": "f3c35b8a-7e94-492d-9925-03d0ef1d8f46"
 }
 ```
+
+#### `GET /buildings/{building_id}/reports/export?format=csv&period_start=...&period_end=...`
+- Tujuan: export report building ke file CSV.
+- Auth: Protected (`ROLE_ADMIN`, `ROLE_BUILDING_MANAGER` sesuai scope).
+
+Response `200`:
+- Content-Type: `text/csv`
+- File attachment: `building_{building_id}_report.csv`
 
 #### `GET /buildings/{building_id}/config`
 - Tujuan: membaca config lokal building (v1).
@@ -1079,24 +1091,87 @@ Response `200`:
 }
 ```
 
+#### `GET /devices`
+- Tujuan: list global device catalog.
+- Auth: Protected (semua role login, untuk read).
+- Query: `offset`, `limit`, `q`.
+
+#### `POST /devices`
+- Tujuan: tambah global device catalog.
+- Auth: Protected (`ROLE_ADMIN`).
+
+#### `PUT /devices/{device_key}`
+- Tujuan: update global device catalog.
+- Auth: Protected (`ROLE_ADMIN`).
+
+#### `DELETE /devices/{device_key}`
+- Tujuan: soft-disable global device catalog (`is_active=false`).
+- Auth: Protected (`ROLE_ADMIN`).
+
 #### `GET /units/{unit_id}/devices?community_id={community_id}`
-- Tujuan: metadata device per unit.
-- Auth: Protected (scope check community).
+- Tujuan: list device per unit.
+- Auth: Protected (scope role-based per unit).
 
 Response `200`:
 ```json
-[
-  {
-    "device_id": "ac",
-    "controllable": true,
-    "schedules": [
-      {
-        "start_hour": 18,
-        "end_hour": 22
-      }
-    ]
+{
+  "items": [
+    {
+      "device_id": "ac",
+      "controllable": true,
+      "schedules": [
+        {
+          "start_hour": 18,
+          "end_hour": 22
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "total": 1,
+    "offset": 0,
+    "limit": 20,
+    "has_next": false
   }
-]
+}
+```
+
+#### `POST /units/{unit_id}/devices?community_id={community_id}`
+- Tujuan: tambah device ke unit.
+- Auth: Protected (admin/coordinator/building_manager/resident pada scope unit yang diizinkan).
+
+#### `PUT /units/{unit_id}/devices/{device_id}?community_id={community_id}`
+- Tujuan: update metadata device unit.
+- Auth: Protected (scope role-based).
+
+#### `DELETE /units/{unit_id}/devices/{device_id}?community_id={community_id}`
+- Tujuan: hapus device dari unit.
+- Auth: Protected (scope role-based).
+
+#### `POST /units/{unit_id}/devices/{device_id}/control?community_id={community_id}`
+- Tujuan: kontrol device nyata (`action=on|off`) dan publish command ke MQTT.
+- Auth: Protected (scope role-based).
+
+Body:
+```json
+{
+  "action": "on"
+}
+```
+
+Response `200`:
+```json
+{
+  "command_id": "58c04b95-6adb-4a96-8d8c-b7ec35f09f1f",
+  "community_id": "C01",
+  "unit_id": "U01",
+  "device_id": "ac",
+  "action": "on",
+  "topic": "energy/C01/U01/control/ac",
+  "status": "sent",
+  "error": null,
+  "created_at": "2026-05-05T19:00:00+00:00"
+}
 ```
 
 #### `PUT /units/{unit_id}/va?community_id={community_id}`
@@ -1137,9 +1212,25 @@ Response `200`:
   "status": "queued",
   "scope": "community",
   "community_id": "C01",
-  "message": "Mohon kurangi beban pada jam puncak malam ini."
+  "notification_id": "a61ec220-c0cb-48e4-a48f-ad4eb14d3c0a"
 }
 ```
+
+#### `GET /communities/{community_id}/reports/export?format=csv&period_start=...&period_end=...`
+- Tujuan: export report community ke CSV.
+- Auth: Protected (scope check community).
+
+Response `200`:
+- Content-Type: `text/csv`
+- File attachment: `community_{community_id}_report.csv`
+
+#### `GET /notifications`
+- Tujuan: list notifikasi yang tersimpan (dengan delivery status).
+- Auth: Protected.
+
+#### `GET /notifications/{notification_id}`
+- Tujuan: detail notifikasi (termasuk delivery).
+- Auth: Protected.
 
 ---
 

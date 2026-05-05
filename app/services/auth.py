@@ -53,6 +53,7 @@ class AuthService:
             "role": user.role.value,
             "community_id": user.community_id,
             "building_id": user.building_id,
+            "unit_id": user.unit_id,
             "status": user.status.value,
             "type": token_type,
             "iat": int(now.timestamp()),

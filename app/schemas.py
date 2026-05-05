@@ -257,6 +257,7 @@ class AuthMeResponse(BaseModel):
     status: str
     community_id: Optional[str] = None
     building_id: Optional[str] = None
+    unit_id: Optional[str] = None
 
 
 class MeDashboardUser(BaseModel):
@@ -270,6 +271,7 @@ class MeDashboardUser(BaseModel):
 class MeDashboardScope(BaseModel):
     community_id: Optional[str] = None
     building_id: Optional[str] = None
+    unit_id: Optional[str] = None
 
 
 class MeDashboardResponse(BaseModel):
@@ -288,6 +290,7 @@ class UserCreateRequest(BaseModel):
     status: str = "PENDING"
     community_id: Optional[str] = None
     building_id: Optional[str] = None
+    unit_id: Optional[str] = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -297,6 +300,7 @@ class UserUpdateRequest(BaseModel):
     status: Optional[str] = None
     community_id: Optional[str] = None
     building_id: Optional[str] = None
+    unit_id: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -307,6 +311,7 @@ class UserResponse(BaseModel):
     status: str
     community_id: Optional[str] = None
     building_id: Optional[str] = None
+    unit_id: Optional[str] = None
 
 
 class UsersListResponse(BaseModel):
@@ -463,3 +468,94 @@ class BuildingConfigResponse(BaseModel):
 
 class BuildingConfigUpdateRequest(BaseModel):
     peak_threshold_kwh: float = Field(gt=0)
+
+
+class NotificationDeliveryItem(BaseModel):
+    target_type: str
+    target_id: str
+    status: str
+    delivered_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+
+class NotificationResponse(BaseModel):
+    notification_id: str
+    scope: str
+    community_id: Optional[str] = None
+    building_id: Optional[str] = None
+    message: str
+    created_by_user_id: Optional[str] = None
+    created_at: datetime
+    deliveries: List[NotificationDeliveryItem] = Field(default_factory=list)
+
+
+class NotificationsListResponse(BaseModel):
+    items: List[NotificationResponse]
+    meta: ListMetaResponse
+
+
+class DeviceCatalogCreateRequest(BaseModel):
+    device_key: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=128)
+    default_power_watt: Optional[float] = Field(default=None, gt=0)
+    controllable: bool = True
+
+
+class DeviceCatalogUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    default_power_watt: Optional[float] = Field(default=None, gt=0)
+    controllable: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
+class DeviceCatalogResponse(BaseModel):
+    device_key: str
+    display_name: str
+    default_power_watt: Optional[float] = None
+    controllable: bool
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class DeviceCatalogListResponse(BaseModel):
+    items: List[DeviceCatalogResponse]
+    meta: ListMetaResponse
+
+
+class UnitDeviceCreateRequest(BaseModel):
+    device_id: str = Field(min_length=1, max_length=64)
+    controllable: bool = True
+    schedules: Optional[List[Dict[str, Any]]] = None
+
+
+class UnitDeviceUpdateRequest(BaseModel):
+    controllable: Optional[bool] = None
+    schedules: Optional[List[Dict[str, Any]]] = None
+
+
+class UnitDeviceResponse(BaseModel):
+    device_id: str
+    controllable: bool
+    schedules: Optional[List[Dict[str, Any]]] = None
+
+
+class UnitDevicesListResponse(BaseModel):
+    items: List[UnitDeviceResponse]
+    meta: ListMetaResponse
+
+
+class DeviceControlRequest(BaseModel):
+    action: str = Field(pattern="^(on|off)$")
+
+
+class DeviceControlResponse(BaseModel):
+    command_id: str
+    community_id: str
+    unit_id: str
+    device_id: str
+    action: str
+    topic: str
+    status: str
+    error: Optional[str] = None
+    created_at: datetime

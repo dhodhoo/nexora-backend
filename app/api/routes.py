@@ -1,12 +1,16 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
+import csv
+import io
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, asc, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import AIAnalysisResult, AuditLog, Building, BuildingConfig, BuildingUnit, Community, CommunitySimulationConfig, DeadLetter, Device, EnergyReading, RevokedToken, Unit, User, UserRole, UserStatus
+from app.models import AIAnalysisResult, AuditLog, Building, BuildingConfig, BuildingUnit, Community, CommunitySimulationConfig, DeadLetter, Device, DeviceCatalog, DeviceCommand, EnergyReading, Notification, NotificationDelivery, RevokedToken, Unit, User, UserRole, UserStatus
 from app.schemas import (
     AddCommunityMemberRequest,
     AIRecommendationsResponse,
@@ -47,6 +51,12 @@ from app.schemas import (
     DeadLetterItem,
     DeadLettersListResponse,
     DeviceMetadataResponse,
+    DeviceCatalogCreateRequest,
+    DeviceCatalogListResponse,
+    DeviceCatalogResponse,
+    DeviceCatalogUpdateRequest,
+    DeviceControlRequest,
+    DeviceControlResponse,
     IngestionPerCommunityItem,
     IngestionStatusResponse,
     LoginRequest,
@@ -58,6 +68,10 @@ from app.schemas import (
     ResetPasswordRequest,
     TokenResponse,
     UnitCreateRequest,
+    UnitDeviceCreateRequest,
+    UnitDeviceResponse,
+    UnitDevicesListResponse,
+    UnitDeviceUpdateRequest,
     UnitCrudResponse,
     UnitsListResponse,
     UnitSummaryResponse,
@@ -67,10 +81,14 @@ from app.schemas import (
     UserResponse,
     UsersListResponse,
     UserUpdateRequest,
+    NotificationResponse,
+    NotificationDeliveryItem,
+    NotificationsListResponse,
 )
 from app.services.ai_integration import ai_orchestrator
 from app.services.auth import AuthService, ensure_building_access, ensure_community_access, get_current_user, require_roles
 from app.services.dashboard import build_dashboard_snapshot, build_load_curve, build_peak_risk, build_units_summary
+from app.services.device_control import publish_device_command
 from app.services.ingestion import QueryService
 from app.services.rate_limit import broadcast_rate_limiter
 from app.services.realtime_ws import dashboard_ws_manager
@@ -116,6 +134,107 @@ def _ensure_community_member_manager_access(community_id: str, user: User) -> No
     if user.role == UserRole.COORDINATOR and user.community_id == community_id:
         return
     raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _ensure_unit_access(unit_id: str, user: User) -> None:
+    if user.role == UserRole.ADMIN:
+        return
+    if user.role == UserRole.RESIDENT and user.unit_id == unit_id:
+        return
+    if user.role == UserRole.COORDINATOR:
+        return
+    if user.role == UserRole.BUILDING_MANAGER:
+        return
+    raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _ensure_unit_operation_access(db: Session, current_user: User, community_id: str, unit_id: str) -> Unit:
+    unit = db.execute(select(Unit).where(and_(Unit.unit_id == unit_id, Unit.community_id == community_id))).scalar_one_or_none()
+    if not unit:
+        raise HTTPException(status_code=404, detail="Not found")
+    if current_user.role == UserRole.ADMIN:
+        return unit
+    if current_user.role == UserRole.RESIDENT:
+        if current_user.unit_id != unit_id:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return unit
+    if current_user.role == UserRole.COORDINATOR:
+        ensure_community_access(community_id, current_user)
+        return unit
+    if current_user.role == UserRole.BUILDING_MANAGER:
+        if not current_user.building_id:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        building_match = db.execute(
+            select(BuildingUnit.id).where(
+                and_(
+                    BuildingUnit.building_id == current_user.building_id,
+                    BuildingUnit.unit_id == unit_id,
+                    BuildingUnit.is_active.is_(True),
+                )
+            )
+        ).first()
+        if not building_match:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return unit
+    raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _validate_user_scope(
+    role: UserRole,
+    community_id: str | None,
+    building_id: str | None,
+    unit_id: str | None,
+) -> None:
+    if community_id and building_id:
+        raise HTTPException(status_code=400, detail="community_id and building_id cannot both be set")
+    if role == UserRole.ADMIN:
+        return
+    if role in {UserRole.RESIDENT, UserRole.COORDINATOR, UserRole.BUILDING_MANAGER} and not unit_id:
+        raise HTTPException(status_code=400, detail="unit_id is required for this role")
+
+
+def _notification_with_deliveries(db: Session, row: Notification) -> NotificationResponse:
+    deliveries = db.execute(
+        select(NotificationDelivery)
+        .where(NotificationDelivery.notification_id == row.notification_id)
+        .order_by(NotificationDelivery.created_at.asc())
+    ).scalars().all()
+    return NotificationResponse(
+        notification_id=row.notification_id,
+        scope=row.scope,
+        community_id=row.community_id,
+        building_id=row.building_id,
+        message=row.message,
+        created_by_user_id=row.created_by_user_id,
+        created_at=row.created_at,
+        deliveries=[
+            NotificationDeliveryItem(
+                target_type=d.target_type,
+                target_id=d.target_id,
+                status=d.status,
+                delivered_at=d.delivered_at,
+                error=d.error,
+            )
+            for d in deliveries
+        ],
+    )
+
+
+def _parse_period(period_start: str | None, period_end: str | None):
+    start_dt = assume_utc(datetime.fromisoformat(period_start)) if period_start else None
+    end_dt = assume_utc(datetime.fromisoformat(period_end)) if period_end else None
+    return start_dt, end_dt
+
+
+def _build_csv_export(unit_rows: list[dict], total_kwh: float, total_cost: float) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["unit_id", "total_kwh", "estimated_cost"])
+    for row in unit_rows:
+        writer.writerow([row["unit_id"], f"{row['total_kwh']:.4f}", f"{row['estimated_cost']:.2f}"])
+    writer.writerow([])
+    writer.writerow(["TOTAL", f"{total_kwh:.4f}", f"{total_cost:.2f}"])
+    return output.getvalue()
 
 
 def _resolve_include_simulation(
@@ -177,6 +296,7 @@ def auth_me(current_user: User = Depends(get_current_user)):
         status=current_user.status.value,
         community_id=current_user.community_id,
         building_id=current_user.building_id,
+        unit_id=current_user.unit_id,
     )
 
 
@@ -189,7 +309,7 @@ def me_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get
         role=current_user.role.value,
         status=current_user.status.value,
     )
-    scope_info = MeDashboardScope(community_id=current_user.community_id, building_id=current_user.building_id)
+    scope_info = MeDashboardScope(community_id=current_user.community_id, building_id=current_user.building_id, unit_id=current_user.unit_id)
     widgets: dict = {}
 
     if current_user.role == UserRole.ADMIN:
@@ -285,19 +405,18 @@ def list_users(
         count_stmt = count_stmt.where(condition)
     total = int(db.execute(count_stmt).scalar_one())
     rows = db.execute(stmt.order_by(User.user_id).offset(offset).limit(limit)).scalars().all()
-    items = [UserResponse(user_id=r.user_id, full_name=r.full_name, email=r.email, role=r.role.value, status=r.status.value, community_id=r.community_id, building_id=r.building_id) for r in rows]
+    items = [UserResponse(user_id=r.user_id, full_name=r.full_name, email=r.email, role=r.role.value, status=r.status.value, community_id=r.community_id, building_id=r.building_id, unit_id=r.unit_id) for r in rows]
     return {"items": items, "meta": _meta(total, offset, limit)}
 
 
 @router.post("/users", response_model=UserResponse)
 def create_user(payload: UserCreateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
-    if payload.community_id and payload.building_id:
-        raise HTTPException(status_code=400, detail="community_id and building_id cannot both be set")
     exists = db.execute(select(User).where(or_(User.user_id == payload.user_id, User.email == payload.email))).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="User already exists")
     role = UserRole(payload.role)
     status_value = UserStatus(payload.status)
+    _validate_user_scope(role=role, community_id=payload.community_id, building_id=payload.building_id, unit_id=payload.unit_id)
     user = User(
         user_id=payload.user_id,
         full_name=payload.full_name,
@@ -307,11 +426,12 @@ def create_user(payload: UserCreateRequest, db: Session = Depends(get_db), _: Us
         status=status_value,
         community_id=payload.community_id,
         building_id=payload.building_id,
+        unit_id=payload.unit_id,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    return UserResponse(user_id=user.user_id, full_name=user.full_name, email=user.email, role=user.role.value, status=user.status.value, community_id=user.community_id, building_id=user.building_id)
+    return UserResponse(user_id=user.user_id, full_name=user.full_name, email=user.email, role=user.role.value, status=user.status.value, community_id=user.community_id, building_id=user.building_id, unit_id=user.unit_id)
 
 
 @router.get("/users/{user_id}", response_model=UserResponse)
@@ -321,7 +441,7 @@ def get_user(user_id: str, db: Session = Depends(get_db), current_user: User = D
     row = db.execute(select(User).where(User.user_id == user_id)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    return UserResponse(user_id=row.user_id, full_name=row.full_name, email=row.email, role=row.role.value, status=row.status.value, community_id=row.community_id, building_id=row.building_id)
+    return UserResponse(user_id=row.user_id, full_name=row.full_name, email=row.email, role=row.role.value, status=row.status.value, community_id=row.community_id, building_id=row.building_id, unit_id=row.unit_id)
 
 
 @router.put("/users/{user_id}", response_model=UserResponse)
@@ -331,7 +451,7 @@ def update_user(user_id: str, payload: UserUpdateRequest, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Not found")
     if current_user.role != UserRole.ADMIN and current_user.user_id != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
-    if current_user.role != UserRole.ADMIN and any([payload.role, payload.status, payload.community_id, payload.building_id]):
+    if current_user.role != UserRole.ADMIN and any([payload.role, payload.status, payload.community_id, payload.building_id, payload.unit_id]):
         raise HTTPException(status_code=403, detail="Only admin can change role/scope/status")
 
     if payload.full_name is not None:
@@ -342,14 +462,19 @@ def update_user(user_id: str, payload: UserUpdateRequest, db: Session = Depends(
         row.role = UserRole(payload.role)
     if payload.status is not None:
         row.status = UserStatus(payload.status)
-    if payload.community_id is not None or payload.building_id is not None:
-        if payload.community_id and payload.building_id:
-            raise HTTPException(status_code=400, detail="community_id and building_id cannot both be set")
+    if payload.community_id is not None or payload.building_id is not None or payload.unit_id is not None:
+        _validate_user_scope(
+            role=UserRole(payload.role) if payload.role else row.role,
+            community_id=payload.community_id,
+            building_id=payload.building_id,
+            unit_id=payload.unit_id,
+        )
         row.community_id = payload.community_id
         row.building_id = payload.building_id
+        row.unit_id = payload.unit_id
     db.commit()
     db.refresh(row)
-    return UserResponse(user_id=row.user_id, full_name=row.full_name, email=row.email, role=row.role.value, status=row.status.value, community_id=row.community_id, building_id=row.building_id)
+    return UserResponse(user_id=row.user_id, full_name=row.full_name, email=row.email, role=row.role.value, status=row.status.value, community_id=row.community_id, building_id=row.building_id, unit_id=row.unit_id)
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -588,6 +713,50 @@ def building_reports_metadata(
     )
 
 
+@router.get("/buildings/{building_id}/reports/export")
+def building_reports_export(
+    building_id: str,
+    format: str = "csv",
+    period_start: str | None = None,
+    period_end: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    if format.lower() != "csv":
+        raise HTTPException(status_code=400, detail="Only csv format is supported")
+    unit_ids = _building_unit_ids(db, building_id)
+    start_dt, end_dt = _parse_period(period_start, period_end)
+    unit_rows = []
+    total_kwh = 0.0
+    total_cost = 0.0
+    for uid in unit_ids:
+        conditions = [EnergyReading.unit_id == uid]
+        if start_dt:
+            conditions.append(EnergyReading.timestamp >= start_dt.replace(tzinfo=None))
+        if end_dt:
+            conditions.append(EnergyReading.timestamp <= end_dt.replace(tzinfo=None))
+        if current_user.role != UserRole.ADMIN:
+            conditions.append(EnergyReading.is_simulation.is_(False))
+        kwh, cost = db.execute(
+            select(func.coalesce(func.sum(EnergyReading.kwh), 0.0), func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0)).where(and_(*conditions))
+        ).one()
+        kwh_f = float(kwh)
+        cost_f = float(cost)
+        total_kwh += kwh_f
+        total_cost += cost_f
+        unit_rows.append({"unit_id": uid, "total_kwh": kwh_f, "estimated_cost": cost_f})
+    csv_content = _build_csv_export(unit_rows, total_kwh, total_cost)
+    filename = f"building_{building_id}_report.csv"
+    return StreamingResponse(
+        iter([csv_content]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/buildings/{building_id}/consumption", response_model=BuildingConsumptionResponse)
 def building_consumption(
     building_id: str,
@@ -700,13 +869,36 @@ def building_recommendations(building_id: str, db: Session = Depends(get_db), cu
 
 
 @router.post("/buildings/{building_id}/notifications")
-def send_building_broadcast(building_id: str, payload: BroadcastRequest, current_user: User = Depends(get_current_user)):
+def send_building_broadcast(
+    building_id: str,
+    payload: BroadcastRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
         raise HTTPException(status_code=403, detail="Forbidden")
     ensure_building_access(building_id, current_user)
     if current_user.role != UserRole.ADMIN:
         broadcast_rate_limiter.check_and_increment(current_user.user_id, limit=5)
-    return {"status": "queued", "scope": "building", "building_id": building_id, "message": payload.message}
+    notification_id = str(uuid.uuid4())
+    row = Notification(
+        notification_id=notification_id,
+        scope="building",
+        building_id=building_id,
+        message=payload.message,
+        created_by_user_id=current_user.user_id,
+    )
+    db.add(row)
+    db.add(
+        NotificationDelivery(
+            notification_id=notification_id,
+            target_type="scope",
+            target_id=building_id,
+            status="queued",
+        )
+    )
+    db.commit()
+    return {"status": "queued", "scope": "building", "building_id": building_id, "notification_id": notification_id}
 
 
 @router.get("/buildings/{building_id}/config", response_model=BuildingConfigResponse)
@@ -1103,14 +1295,282 @@ def peak_risk(
     return build_peak_risk(db, community_id, include_simulation=resolved_include_sim)
 
 
-@router.get("/units/{unit_id}/devices")
-def unit_devices(unit_id: str, community_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@router.get("/communities/{community_id}/reports/export")
+def community_reports_export(
+    community_id: str,
+    format: str = "csv",
+    period_start: str | None = None,
+    period_end: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     ensure_community_access(community_id, current_user)
-    unit = db.execute(select(Unit).where(and_(Unit.unit_id == unit_id, Unit.community_id == community_id))).scalar_one_or_none()
-    if not unit:
+    if format.lower() != "csv":
+        raise HTTPException(status_code=400, detail="Only csv format is supported")
+    units = db.execute(select(Unit).where(Unit.community_id == community_id).order_by(Unit.unit_id)).scalars().all()
+    start_dt, end_dt = _parse_period(period_start, period_end)
+    unit_rows = []
+    total_kwh = 0.0
+    total_cost = 0.0
+    for unit in units:
+        conditions = [EnergyReading.community_id == community_id, EnergyReading.unit_id == unit.unit_id]
+        if start_dt:
+            conditions.append(EnergyReading.timestamp >= start_dt.replace(tzinfo=None))
+        if end_dt:
+            conditions.append(EnergyReading.timestamp <= end_dt.replace(tzinfo=None))
+        if current_user.role != UserRole.ADMIN:
+            conditions.append(EnergyReading.is_simulation.is_(False))
+        kwh, cost = db.execute(
+            select(func.coalesce(func.sum(EnergyReading.kwh), 0.0), func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0)).where(and_(*conditions))
+        ).one()
+        kwh_f = float(kwh)
+        cost_f = float(cost)
+        total_kwh += kwh_f
+        total_cost += cost_f
+        unit_rows.append({"unit_id": unit.unit_id, "total_kwh": kwh_f, "estimated_cost": cost_f})
+
+    csv_content = _build_csv_export(unit_rows, total_kwh, total_cost)
+    filename = f"community_{community_id}_report.csv"
+    return StreamingResponse(
+        iter([csv_content]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/devices", response_model=DeviceCatalogListResponse)
+def list_global_devices(
+    offset: int = 0,
+    limit: int = 20,
+    q: str | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    limit = _validate_pagination(offset, limit)
+    stmt = select(DeviceCatalog)
+    count_stmt = select(func.count(DeviceCatalog.id))
+    if q:
+        pattern = f"%{q}%"
+        condition = or_(DeviceCatalog.device_key.ilike(pattern), DeviceCatalog.display_name.ilike(pattern))
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
+    total = int(db.execute(count_stmt).scalar_one())
+    rows = db.execute(stmt.order_by(DeviceCatalog.device_key).offset(offset).limit(limit)).scalars().all()
+    items = [
+        DeviceCatalogResponse(
+            device_key=r.device_key,
+            display_name=r.display_name,
+            default_power_watt=r.default_power_watt,
+            controllable=r.controllable,
+            is_active=r.is_active,
+            created_at=r.created_at,
+            updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
+    return {"items": items, "meta": _meta(total, offset, limit)}
+
+
+@router.post("/devices", response_model=DeviceCatalogResponse)
+def create_global_device(
+    payload: DeviceCatalogCreateRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.ADMIN)),
+):
+    exists = db.execute(select(DeviceCatalog).where(DeviceCatalog.device_key == payload.device_key)).scalar_one_or_none()
+    if exists:
+        raise HTTPException(status_code=400, detail="Device key already exists")
+    row = DeviceCatalog(
+        device_key=payload.device_key,
+        display_name=payload.display_name,
+        default_power_watt=payload.default_power_watt,
+        controllable=payload.controllable,
+        is_active=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return DeviceCatalogResponse(
+        device_key=row.device_key,
+        display_name=row.display_name,
+        default_power_watt=row.default_power_watt,
+        controllable=row.controllable,
+        is_active=row.is_active,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.put("/devices/{device_key}", response_model=DeviceCatalogResponse)
+def update_global_device(
+    device_key: str,
+    payload: DeviceCatalogUpdateRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.ADMIN)),
+):
+    row = db.execute(select(DeviceCatalog).where(DeviceCatalog.device_key == device_key)).scalar_one_or_none()
+    if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    rows = db.execute(select(Device).where(Device.unit_id == unit.id)).scalars().all()
-    return [DeviceMetadataResponse(device_id=r.device_id, controllable=r.controllable, schedules=r.schedules).model_dump() for r in rows]
+    if payload.display_name is not None:
+        row.display_name = payload.display_name
+    if payload.default_power_watt is not None:
+        row.default_power_watt = payload.default_power_watt
+    if payload.controllable is not None:
+        row.controllable = payload.controllable
+    if payload.is_active is not None:
+        row.is_active = payload.is_active
+    db.commit()
+    db.refresh(row)
+    return DeviceCatalogResponse(
+        device_key=row.device_key,
+        display_name=row.display_name,
+        default_power_watt=row.default_power_watt,
+        controllable=row.controllable,
+        is_active=row.is_active,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.delete("/devices/{device_key}")
+def delete_global_device(
+    device_key: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.ADMIN)),
+):
+    row = db.execute(select(DeviceCatalog).where(DeviceCatalog.device_key == device_key)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    row.is_active = False
+    db.commit()
+    return {"status": "disabled", "device_key": device_key}
+
+
+@router.get("/units/{unit_id}/devices", response_model=UnitDevicesListResponse)
+def unit_devices(
+    unit_id: str,
+    community_id: str,
+    offset: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    limit = _validate_pagination(offset, limit)
+    unit = _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    total = int(db.execute(select(func.count(Device.id)).where(Device.unit_id == unit.id)).scalar_one())
+    rows = db.execute(select(Device).where(Device.unit_id == unit.id).order_by(Device.device_id).offset(offset).limit(limit)).scalars().all()
+    items = [UnitDeviceResponse(device_id=r.device_id, controllable=r.controllable, schedules=r.schedules) for r in rows]
+    return {"items": items, "meta": _meta(total, offset, limit)}
+
+
+@router.post("/units/{unit_id}/devices", response_model=UnitDeviceResponse)
+def unit_device_create(
+    unit_id: str,
+    community_id: str,
+    payload: UnitDeviceCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    unit = _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    exists = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == payload.device_id))).scalar_one_or_none()
+    if exists:
+        raise HTTPException(status_code=400, detail="Device already exists on this unit")
+    row = Device(unit_id=unit.id, device_id=payload.device_id, controllable=payload.controllable, schedules=payload.schedules)
+    db.add(row)
+    db.commit()
+    return UnitDeviceResponse(device_id=row.device_id, controllable=row.controllable, schedules=row.schedules)
+
+
+@router.put("/units/{unit_id}/devices/{device_id}", response_model=UnitDeviceResponse)
+def unit_device_update(
+    unit_id: str,
+    device_id: str,
+    community_id: str,
+    payload: UnitDeviceUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    unit = _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    row = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == device_id))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    if payload.controllable is not None:
+        row.controllable = payload.controllable
+    if payload.schedules is not None:
+        row.schedules = payload.schedules
+    db.commit()
+    return UnitDeviceResponse(device_id=row.device_id, controllable=row.controllable, schedules=row.schedules)
+
+
+@router.delete("/units/{unit_id}/devices/{device_id}")
+def unit_device_delete(
+    unit_id: str,
+    device_id: str,
+    community_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    unit = _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    row = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == device_id))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    db.delete(row)
+    db.commit()
+    return {"status": "deleted", "unit_id": unit_id, "device_id": device_id}
+
+
+@router.post("/units/{unit_id}/devices/{device_id}/control", response_model=DeviceControlResponse)
+def unit_device_control(
+    unit_id: str,
+    device_id: str,
+    community_id: str,
+    payload: DeviceControlRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    unit = _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    row = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == device_id))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not row.controllable:
+        raise HTTPException(status_code=400, detail="Device is not controllable")
+
+    command_id = str(uuid.uuid4())
+    topic = f"energy/{community_id}/{unit_id}/control/{device_id}"
+    command_payload = {
+        "command_id": command_id,
+        "community_id": community_id,
+        "unit_id": unit_id,
+        "device_id": device_id,
+        "action": payload.action,
+        "requested_at": utc_now().isoformat(),
+    }
+    sent, error_msg = publish_device_command(topic=topic, payload=command_payload)
+    cmd = DeviceCommand(
+        command_id=command_id,
+        community_id=community_id,
+        unit_id=unit_id,
+        device_id=device_id,
+        action=payload.action,
+        topic=topic,
+        status="sent" if sent else "failed",
+        error=error_msg,
+        created_by_user_id=current_user.user_id,
+    )
+    db.add(cmd)
+    db.commit()
+    db.refresh(cmd)
+    return DeviceControlResponse(
+        command_id=cmd.command_id,
+        community_id=cmd.community_id,
+        unit_id=cmd.unit_id,
+        device_id=cmd.device_id,
+        action=cmd.action,
+        topic=cmd.topic,
+        status=cmd.status,
+        error=cmd.error,
+        created_at=cmd.created_at,
+    )
 
 
 @router.put("/units/{unit_id}/va")
@@ -1125,13 +1585,80 @@ def update_unit_va(unit_id: str, payload: UnitVaUpdateRequest, community_id: str
 
 
 @router.post("/communities/{community_id}/notifications")
-def send_community_broadcast(community_id: str, payload: BroadcastRequest, current_user: User = Depends(get_current_user)):
+def send_community_broadcast(
+    community_id: str,
+    payload: BroadcastRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     ensure_community_access(community_id, current_user)
     if current_user.role not in [UserRole.ADMIN, UserRole.COORDINATOR]:
         raise HTTPException(status_code=403, detail="Forbidden")
     if current_user.role != UserRole.ADMIN:
         broadcast_rate_limiter.check_and_increment(current_user.user_id, limit=5)
-    return {"status": "queued", "scope": "community", "community_id": community_id, "message": payload.message}
+    notification_id = str(uuid.uuid4())
+    row = Notification(
+        notification_id=notification_id,
+        scope="community",
+        community_id=community_id,
+        message=payload.message,
+        created_by_user_id=current_user.user_id,
+    )
+    db.add(row)
+    db.add(
+        NotificationDelivery(
+            notification_id=notification_id,
+            target_type="scope",
+            target_id=community_id,
+            status="queued",
+        )
+    )
+    db.commit()
+    return {"status": "queued", "scope": "community", "community_id": community_id, "notification_id": notification_id}
+
+
+@router.get("/notifications", response_model=NotificationsListResponse)
+def list_notifications(
+    offset: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    limit = _validate_pagination(offset, limit)
+    stmt = select(Notification)
+    count_stmt = select(func.count(Notification.id))
+    if current_user.role == UserRole.COORDINATOR:
+        stmt = stmt.where(Notification.community_id == current_user.community_id)
+        count_stmt = count_stmt.where(Notification.community_id == current_user.community_id)
+    elif current_user.role == UserRole.BUILDING_MANAGER:
+        stmt = stmt.where(Notification.building_id == current_user.building_id)
+        count_stmt = count_stmt.where(Notification.building_id == current_user.building_id)
+    elif current_user.role == UserRole.RESIDENT:
+        stmt = stmt.where(Notification.community_id == current_user.community_id)
+        count_stmt = count_stmt.where(Notification.community_id == current_user.community_id)
+
+    total = int(db.execute(count_stmt).scalar_one())
+    rows = db.execute(stmt.order_by(desc(Notification.created_at)).offset(offset).limit(limit)).scalars().all()
+    items = [_notification_with_deliveries(db, row) for row in rows]
+    return {"items": items, "meta": _meta(total, offset, limit)}
+
+
+@router.get("/notifications/{notification_id}", response_model=NotificationResponse)
+def get_notification(
+    notification_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    row = db.execute(select(Notification).where(Notification.notification_id == notification_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    if current_user.role == UserRole.COORDINATOR and row.community_id != current_user.community_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if current_user.role == UserRole.BUILDING_MANAGER and row.building_id != current_user.building_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if current_user.role == UserRole.RESIDENT and row.community_id != current_user.community_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return _notification_with_deliveries(db, row)
 
 
 @router.get("/ai/health")
