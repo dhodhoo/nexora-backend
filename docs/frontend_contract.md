@@ -13,7 +13,13 @@ Dokumen ini adalah mapping cepat endpoint backend untuk dashboard FE Nexora.
 
 | FE Need | Backend Endpoint | Query Param | Status |
 |---|---|---|---|
+| Profile + role landing data | `GET /me/dashboard` | - | `ready` |
+| Simulation status komunitas | `GET /communities/{community_id}/simulations` | - | `ready` |
+| Toggle simulation komunitas | `POST /communities/{community_id}/simulations/toggle` | - | `ready` |
 | Communities table | `GET /communities` | `offset,limit,q,sort_by,sort_order` | `ready` |
+| Community members table | `GET /communities/{community_id}/members` | `offset,limit,q` | `ready` |
+| Add community member | `POST /communities/{community_id}/members` | - | `ready` |
+| Remove community member | `DELETE /communities/{community_id}/members/{user_id}` | - | `ready` |
 | Units table | `GET /communities/{community_id}/units` | `offset,limit,q,va_min,va_max,sort_by,sort_order` | `ready` |
 | Dead letters table | `GET /ops/dead-letters` | `offset,limit,topic,reason_q,sort_by,sort_order` | `ready` |
 | Dashboard initial payload | `GET /communities/{community_id}/dashboard` | path `community_id` | `ready` |
@@ -21,6 +27,7 @@ Dokumen ini adalah mapping cepat endpoint backend untuk dashboard FE Nexora.
 | Ringkasan per unit | `dashboard.units_summary` | - | `ready` |
 | Kurva beban komunitas | `dashboard.load_curve` | - | `ready` |
 | Risiko peak | `dashboard.peak_risk` | - | `ready` |
+| Mode data dashboard | `dashboard.include_simulation_used` | - | `ready` |
 | Status AI | `dashboard.ai_status` / `GET /ai/status` | `community_id` | `ready` |
 | Rekomendasi AI FE-ready | `GET /communities/{community_id}/ai-recommendations` | path `community_id` | `ready` |
 | Hasil AI detail | `GET /ai/last-result` | `community_id` | `ready` |
@@ -30,6 +37,12 @@ Dokumen ini adalah mapping cepat endpoint backend untuk dashboard FE Nexora.
 
 | FE Field | Source | Nullable | Notes |
 |---|---|---|---|
+| `me.user` | `/me/dashboard.user` | no | identitas user login |
+| `me.scope` | `/me/dashboard.scope` | yes | scope komunitas/gedung user |
+| `me.widgets` | `/me/dashboard.widgets` | no | widget role-aware untuk landing page |
+| `simulation_enabled` | `/communities/{id}/simulations.simulation_enabled` | no | preferensi visibilitas simulation komunitas |
+| `simulation_source` | `/communities/{id}/simulations.source` | no | `default/custom` |
+| `include_simulation_used` | `dashboard.include_simulation_used` | no | mode data yang benar-benar dipakai backend |
 | `community_id` | `dashboard.community.community_id` | no | komunitas target |
 | `total_units` | `dashboard.community.total_units` | no | jumlah unit terdaftar |
 | `total_kwh` | `dashboard.community.total_kwh` | no | agregasi seluruh unit |
@@ -58,6 +71,9 @@ Dokumen ini adalah mapping cepat endpoint backend untuk dashboard FE Nexora.
 | `meta.offset` | list response `.meta.offset` | no | offset aktif |
 | `meta.limit` | list response `.meta.limit` | no | limit aktif |
 | `meta.has_next` | list response `.meta.has_next` | no | tombol next page |
+| `member.user_id` | `/communities/{id}/members.items[*].user_id` | no | id member komunitas |
+| `member.role` | `/communities/{id}/members.items[*].role` | no | role member |
+| `member.status` | `/communities/{id}/members.items[*].status` | no | status akun member |
 
 ## Fallback Behavior
 
@@ -67,6 +83,8 @@ Dokumen ini adalah mapping cepat endpoint backend untuk dashboard FE Nexora.
   - return `404`.
 - Jika AI gagal sementara:
   - dashboard tetap tersedia, `ai_status.stale=true` dan `ai_status.error` terisi.
+- Jika FE ingin menampilkan data simulasi untuk komunitas:
+  - set preferensi via `/communities/{id}/simulations/toggle`, lalu panggil dashboard dengan query explicit `include_simulation=true`.
 - Jika belum ada hasil AI:
   - endpoint rekomendasi tetap `200` dengan `exists=false` dan `recommendations=[]`.
 - Jika WS terputus:

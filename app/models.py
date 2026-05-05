@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+import enum
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, Enum
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -13,6 +14,81 @@ class Community(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     community_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+
+class Building(Base):
+    __tablename__ = "buildings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    building_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+
+class BuildingUnit(Base):
+    __tablename__ = "building_units"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    building_id: Mapped[str] = mapped_column(String(32), index=True)
+    unit_id: Mapped[str] = mapped_column(String(32), index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    metadata_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
+
+    __table_args__ = (UniqueConstraint("building_id", "unit_id", name="uq_building_unit"),)
+
+
+class BuildingConfig(Base):
+    __tablename__ = "building_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    building_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    peak_threshold_kwh: Mapped[float] = mapped_column(Float, nullable=False, default=3.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
+
+
+class CommunitySimulationConfig(Base):
+    __tablename__ = "community_simulation_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    community_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    simulation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
+
+
+class UserRole(str, enum.Enum):
+    ADMIN = "ROLE_ADMIN"
+    COORDINATOR = "ROLE_COORDINATOR"
+    BUILDING_MANAGER = "ROLE_BUILDING_MANAGER"
+    RESIDENT = "ROLE_RESIDENT"
+
+
+class UserStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    PENDING = "PENDING"
+    DELETED = "DELETED"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(128))
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, name="user_role", values_callable=lambda x: [e.value for e in x], validate_strings=True),
+        index=True,
+    )
+    status: Mapped[UserStatus] = mapped_column(Enum(UserStatus, name="user_status"), index=True, default=UserStatus.PENDING)
+    community_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    building_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
 
 
 class Unit(Base):
@@ -68,6 +144,7 @@ class EnergyReading(Base):
     power_watt: Mapped[float] = mapped_column(Float, nullable=True)
     tariff_per_kwh: Mapped[float] = mapped_column(Float, nullable=False)
     estimated_cost: Mapped[float] = mapped_column(Float, nullable=False)
+    is_simulation: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     raw_payload: Mapped[dict] = mapped_column(JSON)
 
     __table_args__ = (UniqueConstraint("community_id", "unit_id", "device_id", "timestamp", name="uq_reading_idempotent"),)
@@ -95,3 +172,27 @@ class AIAnalysisResult(Base):
     payload: Mapped[dict] = mapped_column(JSON)
     result: Mapped[dict] = mapped_column(JSON)
     error: Mapped[str] = mapped_column(String, default="")
+
+
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    jti: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    token_type: Mapped[str] = mapped_column(String(16), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    log_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
+    role: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    action: Mapped[str] = mapped_column(String(16), index=True)
+    resource: Mapped[str] = mapped_column(String(255))
+    payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)

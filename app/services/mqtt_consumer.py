@@ -19,11 +19,18 @@ class MQTTConsumer:
         self.client.on_disconnect = self.on_disconnect
         self.client.on_message = self.on_message
         self._pending_subscribe_topics: dict[int, str] = {}
+        self._running = False
+        self._connected = False
+        self._last_error = ""
 
     def on_connect(self, client, userdata, flags, reason_code, properties=None):
         if reason_code != 0:
+            self._connected = False
+            self._last_error = str(reason_code)
             print(f"[MQTT][CONNECT_FAILED] reason={reason_code}")
             return
+        self._connected = True
+        self._last_error = ""
 
         topics = self._resolve_topics()
         for topic in topics:
@@ -45,6 +52,9 @@ class MQTTConsumer:
         print(f"[MQTT][SUBACK_OK] topic={topic} mid={mid} reason_codes={[str(code) for code in reason_codes]}")
 
     def on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None):
+        self._connected = False
+        if str(reason_code) not in {"0", ""}:
+            self._last_error = str(reason_code)
         print(f"[MQTT][DISCONNECTED] reason={reason_code}")
 
     @staticmethod
@@ -99,9 +109,19 @@ class MQTTConsumer:
         return [payload]
 
     def start(self):
+        self._running = True
         self.client.connect(settings.mqtt_host, settings.mqtt_port, 60)
         self.client.loop_start()
 
     def stop(self):
+        self._running = False
         self.client.loop_stop()
         self.client.disconnect()
+
+    def status(self) -> dict:
+        return {
+            "running": self._running,
+            "connected": self._connected,
+            "last_error": self._last_error,
+            "topics": self._resolve_topics(),
+        }

@@ -2,6 +2,52 @@
 
 Backend orchestrator untuk Nexora: consume data MQTT generator, simpan ke PostgreSQL, sediakan API dashboard, dan orkestrasi call ke AI service per 1 jam.
 
+Dokumen endpoint lengkap (source of truth):
+- [API Reference](/D:/nexora/nexora-backend/docs/API_REFERENCE.md)
+- [FE Freeze Contract](/D:/nexora/nexora-backend/docs/FE_FREEZE_CONTRACT.md)
+- [Demo Evidence Checklist](/D:/nexora/nexora-backend/docs/DEMO_EVIDENCE_CHECKLIST.md)
+
+## Auth & RBAC (Hard Enforce)
+
+Backend sekarang menggunakan JWT bearer untuk endpoint protected.
+
+Public endpoint:
+- `GET /health`
+- `POST /auth/login`
+- `POST /auth/refresh`
+
+Contoh login:
+```json
+{
+  "email": "admin@nexora.local",
+  "password": "admin12345"
+}
+```
+
+Response:
+```json
+{
+  "access_token": "...",
+  "refresh_token": "...",
+  "token_type": "bearer"
+}
+```
+
+Kirim token ke endpoint protected:
+- Header: `Authorization: Bearer <access_token>`
+
+Claim token yang dipakai backend:
+- `sub`, `role`, `community_id`, `building_id`, `status`, `iat`, `exp`.
+
+Role enum:
+- `ROLE_ADMIN`
+- `ROLE_COORDINATOR`
+- `ROLE_BUILDING_MANAGER`
+- `ROLE_RESIDENT`
+
+Status enum:
+- `ACTIVE`, `INACTIVE`, `PENDING`, `DELETED`
+
 ## 1) Progress Backend (Ringkas)
 
 ### Sudah selesai

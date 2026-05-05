@@ -1,109 +1,939 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from datetime import timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import and_, asc, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import AIAnalysisResult, Community, DeadLetter, Device, EnergyReading, Unit
+from app.models import AIAnalysisResult, AuditLog, Building, BuildingConfig, BuildingUnit, Community, CommunitySimulationConfig, DeadLetter, Device, EnergyReading, RevokedToken, Unit, User, UserRole, UserStatus
 from app.schemas import (
+    AddCommunityMemberRequest,
+    AIRecommendationsResponse,
+    AIRecommendationItem,
+    AIStatusResponse,
+    AuthMeResponse,
+    BroadcastRequest,
+    BuildingCreateRequest,
+    BuildingConfigResponse,
+    BuildingConfigUpdateRequest,
+    BuildingConsumptionPoint,
+    BuildingConsumptionResponse,
+    BuildingDetailResponse,
+    BuildingPredictionsResponse,
+    BuildingRecommendationItem,
+    BuildingRecommendationsResponse,
+    BuildingReportMetadataResponse,
+    BuildingUpdateRequest,
+    BuildingResponse,
+    BuildingUnitCreateRequest,
+    BuildingUnitResponse,
+    BuildingUnitsListResponse,
+    BuildingUnitUpdateRequest,
+    BuildingsListResponse,
     BulkDeleteUnitsRequest,
     BulkDeleteUnitsResponse,
-    AIRecommendationItem,
-    AIRecommendationsResponse,
-    AIStatusResponse,
-    CommunityCreateRequest,
-    DashboardCommunitySummary,
-    DashboardResponse,
-    CommunityResponse,
+    CommunityMemberItem,
+    CommunityMemberMutationResponse,
+    CommunitySimulationStateResponse,
+    CommunitySimulationToggleRequest,
+    CommunityMembersListResponse,
     CommunitiesListResponse,
+    CommunityCreateRequest,
+    CommunityResponse,
     CommunityUnitSummaryItem,
     CommunityUpdateRequest,
+    DashboardResponse,
     DeadLetterItem,
     DeadLettersListResponse,
     DeviceMetadataResponse,
     IngestionPerCommunityItem,
     IngestionStatusResponse,
+    LoginRequest,
+    MeDashboardResponse,
+    MeDashboardScope,
+    MeDashboardUser,
     PeakRiskResponse,
+    RefreshRequest,
+    ResetPasswordRequest,
+    TokenResponse,
     UnitCreateRequest,
     UnitCrudResponse,
     UnitsListResponse,
     UnitSummaryResponse,
     UnitUpdateRequest,
     UnitVaUpdateRequest,
+    UserCreateRequest,
+    UserResponse,
+    UsersListResponse,
+    UserUpdateRequest,
 )
 from app.services.ai_integration import ai_orchestrator
+from app.services.auth import AuthService, ensure_building_access, ensure_community_access, get_current_user, require_roles
 from app.services.dashboard import build_dashboard_snapshot, build_load_curve, build_peak_risk, build_units_summary
 from app.services.ingestion import QueryService
+from app.services.rate_limit import broadcast_rate_limiter
 from app.services.realtime_ws import dashboard_ws_manager
-from app.utils.time import utc_now
+from app.utils.time import assume_utc, utc_now
 
 router = APIRouter()
 
 
-@router.get("/communities", response_model=CommunitiesListResponse)
-def list_communities(
+def _meta(total: int, offset: int, limit: int) -> dict:
+    return {"total": total, "offset": offset, "limit": limit, "has_next": (offset + limit) < total}
+
+
+def _validate_pagination(offset: int, limit: int) -> int:
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit must be >= 1")
+    return min(limit, 200)
+
+
+def _validate_sort_order(sort_order: str) -> None:
+    if sort_order not in {"asc", "desc"}:
+        raise HTTPException(status_code=400, detail="sort_order must be 'asc' or 'desc'")
+
+
+def _validate_sort_by(sort_by: str, allowed: set[str]) -> None:
+    if sort_by not in allowed:
+        raise HTTPException(status_code=400, detail=f"sort_by must be one of: {', '.join(sorted(allowed))}")
+
+
+def _building_unit_ids(db: Session, building_id: str) -> list[str]:
+    rows = db.execute(
+        select(BuildingUnit.unit_id).where(
+            and_(BuildingUnit.building_id == building_id, BuildingUnit.is_active.is_(True))
+        )
+    ).all()
+    return [r[0] for r in rows]
+
+
+def _ensure_community_member_manager_access(community_id: str, user: User) -> None:
+    if user.role == UserRole.ADMIN:
+        return
+    if user.role == UserRole.COORDINATOR and user.community_id == community_id:
+        return
+    raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _resolve_include_simulation(
+    db: Session, community_id: str, current_user: User, include_simulation: bool | None
+) -> bool:
+    if include_simulation is not None:
+        return include_simulation
+    # Default behavior locked by requirement: admin sees mixed data, non-admin excludes simulation.
+    if current_user.role == UserRole.ADMIN:
+        return True
+    return False
+
+
+@router.post("/auth/login", response_model=TokenResponse)
+def auth_login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
+    if not user or not AuthService.verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if user.status != UserStatus.ACTIVE:
+        raise HTTPException(status_code=403, detail="Account is not active")
+    return TokenResponse(access_token=AuthService.create_token(user, "access"), refresh_token=AuthService.create_token(user, "refresh"))
+
+
+@router.post("/auth/refresh", response_model=TokenResponse)
+def auth_refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
+    decoded = AuthService.decode(payload.refresh_token)
+    if decoded.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Refresh token required")
+    revoked = db.execute(select(RevokedToken).where(RevokedToken.jti == decoded.get("jti"))).scalar_one_or_none()
+    if revoked:
+        raise HTTPException(status_code=401, detail="Token revoked")
+    user = db.execute(select(User).where(User.user_id == decoded.get("sub"))).scalar_one_or_none()
+    if not user or user.status != UserStatus.ACTIVE:
+        raise HTTPException(status_code=401, detail="User not active")
+    return TokenResponse(access_token=AuthService.create_token(user, "access"), refresh_token=AuthService.create_token(user, "refresh"))
+
+
+@router.post("/auth/logout")
+def auth_logout(payload: RefreshRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    decoded = AuthService.decode(payload.refresh_token)
+    db.add(
+        RevokedToken(
+            jti=decoded.get("jti"),
+            token_type=decoded.get("type", "refresh"),
+            expires_at=utc_now(),
+        )
+    )
+    db.commit()
+    return {"status": "logged_out"}
+
+
+@router.get("/auth/me", response_model=AuthMeResponse)
+def auth_me(current_user: User = Depends(get_current_user)):
+    return AuthMeResponse(
+        user_id=current_user.user_id,
+        full_name=current_user.full_name,
+        email=current_user.email,
+        role=current_user.role.value,
+        status=current_user.status.value,
+        community_id=current_user.community_id,
+        building_id=current_user.building_id,
+    )
+
+
+@router.get("/me/dashboard", response_model=MeDashboardResponse)
+def me_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    user_info = MeDashboardUser(
+        user_id=current_user.user_id,
+        full_name=current_user.full_name,
+        email=current_user.email,
+        role=current_user.role.value,
+        status=current_user.status.value,
+    )
+    scope_info = MeDashboardScope(community_id=current_user.community_id, building_id=current_user.building_id)
+    widgets: dict = {}
+
+    if current_user.role == UserRole.ADMIN:
+        ai_last = db.execute(select(func.max(AIAnalysisResult.analyzed_at))).scalar_one_or_none()
+        widgets = {
+            "global_summary": {
+                "communities_count": int(db.execute(select(func.count(Community.id))).scalar_one()),
+                "units_count": int(db.execute(select(func.count(Unit.id))).scalar_one()),
+                "buildings_count": int(db.execute(select(func.count(Building.id))).scalar_one()),
+                "users_count": int(db.execute(select(func.count(User.id))).scalar_one()),
+            },
+            "ai_overview": {
+                "results_count": int(db.execute(select(func.count(AIAnalysisResult.id))).scalar_one()),
+                "last_analyzed_at": ai_last.isoformat() if ai_last else None,
+            },
+        }
+    elif current_user.role == UserRole.COORDINATOR:
+        if current_user.community_id:
+            snapshot = build_dashboard_snapshot(db, current_user.community_id, include_simulation=False)
+            widgets = {
+                "community_dashboard": snapshot.model_dump() if snapshot else {},
+                "ai_status": ai_orchestrator.get_status(current_user.community_id),
+            }
+        else:
+            widgets = {"community_dashboard": {}, "ai_status": {}}
+    elif current_user.role == UserRole.BUILDING_MANAGER:
+        if current_user.building_id:
+            unit_ids = _building_unit_ids(db, current_user.building_id)
+            total_kwh_24h = 0.0
+            last_timestamp = None
+            if unit_ids:
+                since = assume_utc(utc_now() - timedelta(hours=24)).replace(tzinfo=None)
+                total_kwh_24h = float(
+                    db.execute(
+                        select(func.coalesce(func.sum(EnergyReading.kwh), 0.0)).where(
+                            and_(
+                                EnergyReading.unit_id.in_(unit_ids),
+                                EnergyReading.timestamp >= since,
+                                EnergyReading.is_simulation.is_(False),
+                            )
+                        )
+                    ).scalar_one()
+                )
+                last_timestamp = db.execute(
+                    select(func.max(EnergyReading.timestamp)).where(
+                        and_(EnergyReading.unit_id.in_(unit_ids), EnergyReading.is_simulation.is_(False))
+                    )
+                ).scalar_one_or_none()
+            cfg = db.execute(select(BuildingConfig).where(BuildingConfig.building_id == current_user.building_id)).scalar_one_or_none()
+            widgets = {
+                "building_summary": {
+                    "building_id": current_user.building_id,
+                    "active_units_count": len(unit_ids),
+                    "total_kwh_24h": total_kwh_24h,
+                    "last_timestamp": last_timestamp.isoformat() if last_timestamp else None,
+                    "is_fresh": QueryService.freshness(last_timestamp),
+                },
+                "building_config": {
+                    "peak_threshold_kwh": float(cfg.peak_threshold_kwh) if cfg else 3.0,
+                    "source": "custom" if cfg else "default",
+                },
+            }
+        else:
+            widgets = {"building_summary": {}, "building_config": {}}
+    else:
+        if current_user.community_id:
+            snapshot = build_dashboard_snapshot(db, current_user.community_id, include_simulation=False)
+            widgets = {
+                "community_overview": snapshot.community.model_dump() if snapshot else {},
+                "resident_scope": {"community_id": current_user.community_id},
+            }
+        else:
+            widgets = {"community_overview": {}, "resident_scope": {}}
+
+    return MeDashboardResponse(user=user_info, scope=scope_info, widgets=widgets, generated_at=utc_now())
+
+
+@router.get("/users", response_model=UsersListResponse)
+def list_users(
     offset: int = 0,
     limit: int = 20,
     q: str | None = None,
-    sort_by: str = "community_id",
-    sort_order: str = "asc",
     db: Session = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.ADMIN)),
 ):
-    limit = min(limit, 200)
+    limit = _validate_pagination(offset, limit)
+    stmt = select(User)
+    count_stmt = select(func.count(User.id))
+    if q:
+        pattern = f"%{q}%"
+        condition = or_(User.user_id.ilike(pattern), User.email.ilike(pattern), User.full_name.ilike(pattern))
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
+    total = int(db.execute(count_stmt).scalar_one())
+    rows = db.execute(stmt.order_by(User.user_id).offset(offset).limit(limit)).scalars().all()
+    items = [UserResponse(user_id=r.user_id, full_name=r.full_name, email=r.email, role=r.role.value, status=r.status.value, community_id=r.community_id, building_id=r.building_id) for r in rows]
+    return {"items": items, "meta": _meta(total, offset, limit)}
+
+
+@router.post("/users", response_model=UserResponse)
+def create_user(payload: UserCreateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
+    if payload.community_id and payload.building_id:
+        raise HTTPException(status_code=400, detail="community_id and building_id cannot both be set")
+    exists = db.execute(select(User).where(or_(User.user_id == payload.user_id, User.email == payload.email))).scalar_one_or_none()
+    if exists:
+        raise HTTPException(status_code=400, detail="User already exists")
+    role = UserRole(payload.role)
+    status_value = UserStatus(payload.status)
+    user = User(
+        user_id=payload.user_id,
+        full_name=payload.full_name,
+        email=payload.email,
+        password_hash=AuthService.hash_password(payload.password),
+        role=role,
+        status=status_value,
+        community_id=payload.community_id,
+        building_id=payload.building_id,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return UserResponse(user_id=user.user_id, full_name=user.full_name, email=user.email, role=user.role.value, status=user.status.value, community_id=user.community_id, building_id=user.building_id)
+
+
+@router.get("/users/{user_id}", response_model=UserResponse)
+def get_user(user_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role != UserRole.ADMIN and current_user.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    row = db.execute(select(User).where(User.user_id == user_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    return UserResponse(user_id=row.user_id, full_name=row.full_name, email=row.email, role=row.role.value, status=row.status.value, community_id=row.community_id, building_id=row.building_id)
+
+
+@router.put("/users/{user_id}", response_model=UserResponse)
+def update_user(user_id: str, payload: UserUpdateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    row = db.execute(select(User).where(User.user_id == user_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    if current_user.role != UserRole.ADMIN and current_user.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if current_user.role != UserRole.ADMIN and any([payload.role, payload.status, payload.community_id, payload.building_id]):
+        raise HTTPException(status_code=403, detail="Only admin can change role/scope/status")
+
+    if payload.full_name is not None:
+        row.full_name = payload.full_name
+    if payload.email is not None:
+        row.email = payload.email
+    if payload.role is not None:
+        row.role = UserRole(payload.role)
+    if payload.status is not None:
+        row.status = UserStatus(payload.status)
+    if payload.community_id is not None or payload.building_id is not None:
+        if payload.community_id and payload.building_id:
+            raise HTTPException(status_code=400, detail="community_id and building_id cannot both be set")
+        row.community_id = payload.community_id
+        row.building_id = payload.building_id
+    db.commit()
+    db.refresh(row)
+    return UserResponse(user_id=row.user_id, full_name=row.full_name, email=row.email, role=row.role.value, status=row.status.value, community_id=row.community_id, building_id=row.building_id)
+
+
+@router.post("/users/{user_id}/reset-password")
+def reset_password(user_id: str, payload: ResetPasswordRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
+    row = db.execute(select(User).where(User.user_id == user_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    row.password_hash = AuthService.hash_password(payload.new_password)
+    db.commit()
+    return {"status": "password_reset", "user_id": user_id}
+
+
+@router.get("/buildings", response_model=BuildingsListResponse)
+def list_buildings(offset: int = 0, limit: int = 20, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
+    limit = _validate_pagination(offset, limit)
+    total = int(db.execute(select(func.count(Building.id))).scalar_one())
+    rows = db.execute(select(Building).order_by(Building.building_id).offset(offset).limit(limit)).scalars().all()
+    items = [BuildingResponse(building_id=r.building_id, name=r.name) for r in rows]
+    return {"items": items, "meta": _meta(total, offset, limit)}
+
+
+@router.post("/buildings", response_model=BuildingResponse)
+def create_building(payload: BuildingCreateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
+    exists = db.execute(select(Building).where(Building.building_id == payload.building_id)).scalar_one_or_none()
+    if exists:
+        raise HTTPException(status_code=400, detail="Building already exists")
+    b = Building(building_id=payload.building_id, name=payload.name)
+    db.add(b)
+    db.commit()
+    db.refresh(b)
+    return BuildingResponse(building_id=b.building_id, name=b.name)
+
+
+@router.get("/buildings/{building_id}", response_model=BuildingDetailResponse)
+def get_building(building_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    row = db.execute(select(Building).where(Building.building_id == building_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    return BuildingDetailResponse(building_id=row.building_id, name=row.name)
+
+
+@router.put("/buildings/{building_id}", response_model=BuildingDetailResponse)
+def update_building(
+    building_id: str,
+    payload: BuildingUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    row = db.execute(select(Building).where(Building.building_id == building_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    row.name = payload.name
+    db.commit()
+    db.refresh(row)
+    return BuildingDetailResponse(building_id=row.building_id, name=row.name)
+
+
+@router.delete("/buildings/{building_id}")
+def delete_building(building_id: str, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
+    row = db.execute(select(Building).where(Building.building_id == building_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    active_units = int(
+        db.execute(
+            select(func.count(BuildingUnit.id)).where(and_(BuildingUnit.building_id == building_id, BuildingUnit.is_active.is_(True)))
+        ).scalar_one()
+    )
+    if active_units > 0:
+        raise HTTPException(status_code=400, detail="Building has active units; deactivate/delete units first")
+    db.execute(BuildingUnit.__table__.delete().where(BuildingUnit.building_id == building_id))
+    db.delete(row)
+    db.commit()
+    return {"status": "deleted", "building_id": building_id}
+
+
+@router.get("/buildings/{building_id}/units", response_model=BuildingUnitsListResponse)
+def list_building_units(
+    building_id: str,
+    offset: int = 0,
+    limit: int = 20,
+    q: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    limit = _validate_pagination(offset, limit)
+    stmt = select(BuildingUnit).where(BuildingUnit.building_id == building_id)
+    count_stmt = select(func.count(BuildingUnit.id)).where(BuildingUnit.building_id == building_id)
+    if q:
+        pattern = f"%{q}%"
+        stmt = stmt.where(BuildingUnit.unit_id.ilike(pattern))
+        count_stmt = count_stmt.where(BuildingUnit.unit_id.ilike(pattern))
+    total = int(db.execute(count_stmt).scalar_one())
+    rows = db.execute(stmt.order_by(BuildingUnit.unit_id).offset(offset).limit(limit)).scalars().all()
+    items = [
+        BuildingUnitResponse(
+            building_id=r.building_id,
+            unit_id=r.unit_id,
+            is_active=r.is_active,
+            metadata_json=r.metadata_json,
+            created_at=r.created_at,
+            updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
+    return {"items": items, "meta": _meta(total, offset, limit)}
+
+
+@router.post("/buildings/{building_id}/units", response_model=BuildingUnitResponse)
+def create_building_unit(
+    building_id: str,
+    payload: BuildingUnitCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    building = db.execute(select(Building).where(Building.building_id == building_id)).scalar_one_or_none()
+    if not building:
+        raise HTTPException(status_code=404, detail="Not found")
+    exists = db.execute(
+        select(BuildingUnit).where(and_(BuildingUnit.building_id == building_id, BuildingUnit.unit_id == payload.unit_id))
+    ).scalar_one_or_none()
+    if exists:
+        raise HTTPException(status_code=400, detail="Building unit already exists")
+    row = BuildingUnit(
+        building_id=building_id,
+        unit_id=payload.unit_id,
+        is_active=payload.is_active,
+        metadata_json=payload.metadata_json,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return BuildingUnitResponse(
+        building_id=row.building_id,
+        unit_id=row.unit_id,
+        is_active=row.is_active,
+        metadata_json=row.metadata_json,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.put("/buildings/{building_id}/units/{unit_id}", response_model=BuildingUnitResponse)
+def update_building_unit(
+    building_id: str,
+    unit_id: str,
+    payload: BuildingUnitUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    row = db.execute(
+        select(BuildingUnit).where(and_(BuildingUnit.building_id == building_id, BuildingUnit.unit_id == unit_id))
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    if payload.is_active is not None:
+        row.is_active = payload.is_active
+    if payload.metadata_json is not None:
+        row.metadata_json = payload.metadata_json
+    db.commit()
+    db.refresh(row)
+    return BuildingUnitResponse(
+        building_id=row.building_id,
+        unit_id=row.unit_id,
+        is_active=row.is_active,
+        metadata_json=row.metadata_json,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.delete("/buildings/{building_id}/units/{unit_id}")
+def delete_building_unit(
+    building_id: str,
+    unit_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    row = db.execute(
+        select(BuildingUnit).where(and_(BuildingUnit.building_id == building_id, BuildingUnit.unit_id == unit_id))
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    db.delete(row)
+    db.commit()
+    return {"status": "deleted", "building_id": building_id, "unit_id": unit_id}
+
+
+@router.get("/buildings/{building_id}/reports", response_model=BuildingReportMetadataResponse)
+def building_reports_metadata(
+    building_id: str,
+    period_start: str | None = None,
+    period_end: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    building = db.execute(select(Building).where(Building.building_id == building_id)).scalar_one_or_none()
+    if not building:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    total_units = int(
+        db.execute(select(func.count(BuildingUnit.id)).where(BuildingUnit.building_id == building_id)).scalar_one()
+    )
+    active_units = int(
+        db.execute(
+            select(func.count(BuildingUnit.id)).where(and_(BuildingUnit.building_id == building_id, BuildingUnit.is_active.is_(True)))
+        ).scalar_one()
+    )
+    return BuildingReportMetadataResponse(
+        building_id=building_id,
+        report_type="building_summary",
+        generated_at=utc_now(),
+        period={"start": period_start, "end": period_end},
+        summary={"total_units": total_units, "active_units": active_units},
+        download_url=None,
+    )
+
+
+@router.get("/buildings/{building_id}/consumption", response_model=BuildingConsumptionResponse)
+def building_consumption(
+    building_id: str,
+    window: str = "hourly",
+    hours: int = 24,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    if window not in {"hourly", "daily"}:
+        raise HTTPException(status_code=400, detail="Invalid window")
+    hours = max(1, min(hours, 24 * 30))
+    unit_ids = _building_unit_ids(db, building_id)
+    if not unit_ids:
+        return BuildingConsumptionResponse(
+            building_id=building_id, series=[], total_kwh=0.0, estimated_cost=0.0, last_timestamp=None, is_fresh=False
+        )
+    bucket_expr = (
+        func.to_char(func.date_trunc("hour", EnergyReading.timestamp), "YYYY-MM-DD\"T\"HH24:00:00")
+        if window == "hourly"
+        else func.to_char(func.date_trunc("day", EnergyReading.timestamp), "YYYY-MM-DD")
+    )
+    since = assume_utc(utc_now() - timedelta(hours=hours)).replace(tzinfo=None)
+    conditions = [EnergyReading.unit_id.in_(unit_ids), EnergyReading.timestamp >= since]
+    if current_user.role != UserRole.ADMIN:
+        conditions.append(EnergyReading.is_simulation.is_(False))
+    rows = db.execute(
+        select(
+            bucket_expr.label("bucket"),
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+            func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0).label("estimated_cost"),
+        )
+        .where(and_(*conditions))
+        .group_by(bucket_expr)
+        .order_by(bucket_expr)
+    ).all()
+    last_timestamp = db.execute(select(func.max(EnergyReading.timestamp)).where(and_(*conditions))).scalar_one_or_none()
+    return BuildingConsumptionResponse(
+        building_id=building_id,
+        series=[BuildingConsumptionPoint(bucket=r.bucket, total_kwh=float(r.total_kwh), estimated_cost=float(r.estimated_cost)) for r in rows],
+        total_kwh=float(sum(float(r.total_kwh) for r in rows)),
+        estimated_cost=float(sum(float(r.estimated_cost) for r in rows)),
+        last_timestamp=last_timestamp,
+        is_fresh=QueryService.freshness(last_timestamp),
+    )
+
+
+@router.get("/buildings/{building_id}/predictions", response_model=BuildingPredictionsResponse)
+def building_predictions(building_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    unit_ids = set(_building_unit_ids(db, building_id))
+    if not unit_ids:
+        return BuildingPredictionsResponse(building_id=building_id, exists=False, generated_at=None, community_context={}, unit_predictions={})
+    community_ids = [r[0] for r in db.execute(select(Unit.community_id).where(Unit.unit_id.in_(list(unit_ids))).distinct()).all()]
+    if not community_ids:
+        return BuildingPredictionsResponse(building_id=building_id, exists=False, generated_at=None, community_context={}, unit_predictions={})
+    row = db.execute(
+        select(AIAnalysisResult).where(AIAnalysisResult.community_id.in_(community_ids)).order_by(desc(AIAnalysisResult.analyzed_at))
+    ).scalars().first()
+    if not row or not isinstance(row.result, dict):
+        return BuildingPredictionsResponse(building_id=building_id, exists=False, generated_at=None, community_context={"community_ids": community_ids}, unit_predictions={})
+    rp = row.result.get("result", row.result)
+    up = rp.get("unit_predictions", {}) if isinstance(rp, dict) else {}
+    filtered = {k: float(v) for k, v in up.items() if k in unit_ids and isinstance(v, (int, float))}
+    return BuildingPredictionsResponse(
+        building_id=building_id,
+        exists=True,
+        generated_at=row.analyzed_at.isoformat(),
+        community_context={"community_ids": community_ids, "source_community_id": row.community_id},
+        unit_predictions=filtered,
+    )
+
+
+@router.get("/buildings/{building_id}/recommendations", response_model=BuildingRecommendationsResponse)
+def building_recommendations(building_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    unit_ids = set(_building_unit_ids(db, building_id))
+    if not unit_ids:
+        return BuildingRecommendationsResponse(building_id=building_id, exists=False, generated_at=None, items=[])
+    community_ids = [r[0] for r in db.execute(select(Unit.community_id).where(Unit.unit_id.in_(list(unit_ids))).distinct()).all()]
+    row = db.execute(
+        select(AIAnalysisResult).where(AIAnalysisResult.community_id.in_(community_ids)).order_by(desc(AIAnalysisResult.analyzed_at))
+    ).scalars().first()
+    if not row or not isinstance(row.result, dict):
+        return BuildingRecommendationsResponse(building_id=building_id, exists=False, generated_at=None, items=[])
+    rp = row.result.get("result", row.result)
+    recs = rp.get("recommendations", []) if isinstance(rp, dict) else []
+    items: list[BuildingRecommendationItem] = []
+    for rec in recs:
+        if isinstance(rec, dict) and rec.get("unit_id") in unit_ids:
+            reasons = rec.get("reasons")
+            items.append(
+                BuildingRecommendationItem(
+                    unit_id=rec.get("unit_id"),
+                    device=rec.get("device"),
+                    action=rec.get("action"),
+                    saving=float(rec["saving"]) if isinstance(rec.get("saving"), (int, float)) else None,
+                    co2_reduction=float(rec["co2_reduction"]) if isinstance(rec.get("co2_reduction"), (int, float)) else None,
+                    estimated_reduction_kwh=float(rec["estimated_reduction_kwh"]) if isinstance(rec.get("estimated_reduction_kwh"), (int, float)) else None,
+                    reasons=[str(x) for x in reasons if isinstance(x, str)] if isinstance(reasons, list) else [],
+                )
+            )
+    return BuildingRecommendationsResponse(building_id=building_id, exists=True, generated_at=row.analyzed_at.isoformat(), items=items)
+
+
+@router.post("/buildings/{building_id}/notifications")
+def send_building_broadcast(building_id: str, payload: BroadcastRequest, current_user: User = Depends(get_current_user)):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    if current_user.role != UserRole.ADMIN:
+        broadcast_rate_limiter.check_and_increment(current_user.user_id, limit=5)
+    return {"status": "queued", "scope": "building", "building_id": building_id, "message": payload.message}
+
+
+@router.get("/buildings/{building_id}/config", response_model=BuildingConfigResponse)
+def get_building_config(building_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    row = db.execute(select(BuildingConfig).where(BuildingConfig.building_id == building_id)).scalar_one_or_none()
+    if not row:
+        return BuildingConfigResponse(building_id=building_id, peak_threshold_kwh=3.0, source="default")
+    return BuildingConfigResponse(building_id=building_id, peak_threshold_kwh=float(row.peak_threshold_kwh), source="custom")
+
+
+@router.put("/buildings/{building_id}/config", response_model=BuildingConfigResponse)
+def update_building_config(
+    building_id: str,
+    payload: BuildingConfigUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.BUILDING_MANAGER]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_building_access(building_id, current_user)
+    row = db.execute(select(BuildingConfig).where(BuildingConfig.building_id == building_id)).scalar_one_or_none()
+    if not row:
+        row = BuildingConfig(building_id=building_id, peak_threshold_kwh=payload.peak_threshold_kwh)
+        db.add(row)
+    else:
+        row.peak_threshold_kwh = payload.peak_threshold_kwh
+    db.commit()
+    db.refresh(row)
+    return BuildingConfigResponse(building_id=building_id, peak_threshold_kwh=float(row.peak_threshold_kwh), source="custom")
+
+
+@router.get("/communities", response_model=CommunitiesListResponse)
+def list_communities(offset: int = 0, limit: int = 20, q: str | None = None, sort_by: str = "community_id", sort_order: str = "asc", db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
+    limit = _validate_pagination(offset, limit)
+    _validate_sort_order(sort_order)
+    _validate_sort_by(sort_by, {"community_id", "name"})
     stmt = select(Community)
     count_stmt = select(func.count(Community.id))
-
     if q:
         pattern = f"%{q}%"
         condition = or_(Community.community_id.ilike(pattern), Community.name.ilike(pattern))
         stmt = stmt.where(condition)
         count_stmt = count_stmt.where(condition)
-
     sort_map = {"community_id": Community.community_id, "name": Community.name}
     sort_col = sort_map.get(sort_by, Community.community_id)
     order_expr = desc(sort_col) if sort_order == "desc" else asc(sort_col)
-
     rows = db.execute(stmt.order_by(order_expr).offset(offset).limit(limit)).scalars().all()
     total = int(db.execute(count_stmt).scalar_one())
-    items = [CommunityResponse(community_id=row.community_id, name=row.name) for row in rows]
-    return {
-        "items": items,
-        "meta": {
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "has_next": (offset + limit) < total,
-        },
-    }
+    return {"items": [CommunityResponse(community_id=r.community_id, name=r.name) for r in rows], "meta": _meta(total, offset, limit)}
 
 
 @router.post("/communities", response_model=CommunityResponse)
-def create_community(payload: CommunityCreateRequest, db: Session = Depends(get_db)):
+def create_community(payload: CommunityCreateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
     exists = db.execute(select(Community).where(Community.community_id == payload.community_id)).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="Community already exists")
-
-    community = Community(community_id=payload.community_id, name=payload.name)
-    db.add(community)
+    row = Community(community_id=payload.community_id, name=payload.name)
+    db.add(row)
     db.commit()
-    db.refresh(community)
-    return CommunityResponse(community_id=community.community_id, name=community.name)
+    db.refresh(row)
+    return CommunityResponse(community_id=row.community_id, name=row.name)
 
 
 @router.get("/communities/{community_id}", response_model=CommunityResponse)
-def get_community(community_id: str, db: Session = Depends(get_db)):
+def get_community(community_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
     row = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     return CommunityResponse(community_id=row.community_id, name=row.name)
 
 
+@router.get("/communities/{community_id}/members", response_model=CommunityMembersListResponse)
+def list_community_members(
+    community_id: str,
+    offset: int = 0,
+    limit: int = 20,
+    q: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_community_member_manager_access(community_id, current_user)
+    limit = _validate_pagination(offset, limit)
+    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community:
+        raise HTTPException(status_code=404, detail="Not found")
+    stmt = select(User).where(User.community_id == community_id)
+    count_stmt = select(func.count(User.id)).where(User.community_id == community_id)
+    if q:
+        pattern = f"%{q}%"
+        condition = or_(User.user_id.ilike(pattern), User.full_name.ilike(pattern), User.email.ilike(pattern))
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
+    total = int(db.execute(count_stmt).scalar_one())
+    rows = db.execute(stmt.order_by(User.user_id).offset(offset).limit(limit)).scalars().all()
+    items = [
+        CommunityMemberItem(
+            user_id=r.user_id,
+            full_name=r.full_name,
+            email=r.email,
+            role=r.role.value,
+            status=r.status.value,
+            community_id=r.community_id,
+        )
+        for r in rows
+    ]
+    return {"items": items, "meta": _meta(total, offset, limit)}
+
+
+@router.post("/communities/{community_id}/members", response_model=CommunityMemberMutationResponse)
+def add_community_member(
+    community_id: str,
+    payload: AddCommunityMemberRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_community_member_manager_access(community_id, current_user)
+    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community:
+        raise HTTPException(status_code=404, detail="Not found")
+    user = db.execute(select(User).where(User.user_id == payload.user_id)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.building_id:
+        raise HTTPException(status_code=400, detail="User already assigned to building scope")
+    if user.community_id and user.community_id != community_id:
+        raise HTTPException(status_code=400, detail="User already assigned to another community")
+    if user.community_id == community_id:
+        return CommunityMemberMutationResponse(community_id=community_id, user_id=user.user_id, status="already_member")
+    user.community_id = community_id
+    db.commit()
+    return CommunityMemberMutationResponse(community_id=community_id, user_id=user.user_id, status="added")
+
+
+@router.delete("/communities/{community_id}/members/{user_id}", response_model=CommunityMemberMutationResponse)
+def remove_community_member(
+    community_id: str,
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_community_member_manager_access(community_id, current_user)
+    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community:
+        raise HTTPException(status_code=404, detail="Not found")
+    user = db.execute(select(User).where(User.user_id == user_id)).scalar_one_or_none()
+    if not user or user.community_id != community_id:
+        raise HTTPException(status_code=404, detail="Member not found")
+    user.community_id = None
+    db.commit()
+    return CommunityMemberMutationResponse(community_id=community_id, user_id=user.user_id, status="removed")
+
+
+@router.get("/communities/{community_id}/simulations", response_model=CommunitySimulationStateResponse)
+def get_community_simulation_state(
+    community_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.COORDINATOR]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_community_access(community_id, current_user)
+    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community:
+        raise HTTPException(status_code=404, detail="Not found")
+    row = db.execute(
+        select(CommunitySimulationConfig).where(CommunitySimulationConfig.community_id == community_id)
+    ).scalar_one_or_none()
+    if not row:
+        return CommunitySimulationStateResponse(
+            community_id=community_id,
+            simulation_enabled=False,
+            updated_at=None,
+            source="default",
+        )
+    return CommunitySimulationStateResponse(
+        community_id=community_id,
+        simulation_enabled=bool(row.simulation_enabled),
+        updated_at=row.updated_at,
+        source="custom",
+    )
+
+
+@router.post("/communities/{community_id}/simulations/toggle", response_model=CommunitySimulationStateResponse)
+def toggle_community_simulation_state(
+    community_id: str,
+    payload: CommunitySimulationToggleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in [UserRole.ADMIN, UserRole.COORDINATOR]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ensure_community_access(community_id, current_user)
+    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community:
+        raise HTTPException(status_code=404, detail="Not found")
+    row = db.execute(
+        select(CommunitySimulationConfig).where(CommunitySimulationConfig.community_id == community_id)
+    ).scalar_one_or_none()
+    if not row:
+        row = CommunitySimulationConfig(
+            community_id=community_id,
+            simulation_enabled=payload.simulation_enabled,
+            updated_at=utc_now(),
+        )
+        db.add(row)
+    else:
+        row.simulation_enabled = payload.simulation_enabled
+        row.updated_at = utc_now()
+    db.commit()
+    db.refresh(row)
+    return CommunitySimulationStateResponse(
+        community_id=community_id,
+        simulation_enabled=bool(row.simulation_enabled),
+        updated_at=row.updated_at,
+        source="custom",
+    )
+
+
 @router.put("/communities/{community_id}", response_model=CommunityResponse)
-def update_community(community_id: str, payload: CommunityUpdateRequest, db: Session = Depends(get_db)):
+def update_community(community_id: str, payload: CommunityUpdateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
     row = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-
     row.name = payload.name
     db.commit()
     db.refresh(row)
@@ -111,36 +941,26 @@ def update_community(community_id: str, payload: CommunityUpdateRequest, db: Ses
 
 
 @router.delete("/communities/{community_id}")
-def delete_community(community_id: str, db: Session = Depends(get_db)):
+def delete_community(community_id: str, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
     row = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-
     unit_count = db.execute(select(func.count(Unit.id)).where(Unit.community_id == community_id)).scalar_one()
     if unit_count > 0:
         raise HTTPException(status_code=400, detail="Community has units; delete units first")
-
     db.delete(row)
     db.commit()
     return {"status": "deleted", "community_id": community_id}
 
 
 @router.get("/communities/{community_id}/units", response_model=UnitsListResponse)
-def list_units(
-    community_id: str,
-    offset: int = 0,
-    limit: int = 20,
-    q: str | None = None,
-    va_min: int | None = None,
-    va_max: int | None = None,
-    sort_by: str = "unit_id",
-    sort_order: str = "asc",
-    db: Session = Depends(get_db),
-):
-    limit = min(limit, 200)
+def list_units(community_id: str, offset: int = 0, limit: int = 20, q: str | None = None, va_min: int | None = None, va_max: int | None = None, sort_by: str = "unit_id", sort_order: str = "asc", db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
+    limit = _validate_pagination(offset, limit)
+    _validate_sort_order(sort_order)
+    _validate_sort_by(sort_by, {"unit_id", "va"})
     stmt = select(Unit).where(Unit.community_id == community_id)
     count_stmt = select(func.count(Unit.id)).where(Unit.community_id == community_id)
-
     if q:
         pattern = f"%{q}%"
         stmt = stmt.where(Unit.unit_id.ilike(pattern))
@@ -151,37 +971,19 @@ def list_units(
     if va_max is not None:
         stmt = stmt.where(Unit.va <= va_max)
         count_stmt = count_stmt.where(Unit.va <= va_max)
-
     sort_map = {"unit_id": Unit.unit_id, "va": Unit.va}
     sort_col = sort_map.get(sort_by, Unit.unit_id)
     order_expr = desc(sort_col) if sort_order == "desc" else asc(sort_col)
-
     rows = db.execute(stmt.order_by(order_expr).offset(offset).limit(limit)).scalars().all()
     total = int(db.execute(count_stmt).scalar_one())
-    items = [UnitCrudResponse(community_id=r.community_id, unit_id=r.unit_id, va=r.va) for r in rows]
-    return {
-        "items": items,
-        "meta": {
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "has_next": (offset + limit) < total,
-        },
-    }
+    return {"items": [UnitCrudResponse(community_id=r.community_id, unit_id=r.unit_id, va=r.va) for r in rows], "meta": _meta(total, offset, limit)}
 
 
 @router.post("/communities/{community_id}/units", response_model=UnitCrudResponse)
-def create_unit(community_id: str, payload: UnitCreateRequest, db: Session = Depends(get_db)):
-    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
-    if not community:
-        raise HTTPException(status_code=404, detail="Not found")
-
-    exists = db.execute(
-        select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id == payload.unit_id))
-    ).scalar_one_or_none()
+def create_unit(community_id: str, payload: UnitCreateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
+    exists = db.execute(select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id == payload.unit_id))).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="Unit already exists")
-
     unit = Unit(community_id=community_id, unit_id=payload.unit_id, va=payload.va)
     db.add(unit)
     db.commit()
@@ -190,7 +992,8 @@ def create_unit(community_id: str, payload: UnitCreateRequest, db: Session = Dep
 
 
 @router.get("/communities/{community_id}/units/{unit_id}", response_model=UnitCrudResponse)
-def get_unit(community_id: str, unit_id: str, db: Session = Depends(get_db)):
+def get_unit(community_id: str, unit_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
     unit = db.execute(select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id == unit_id))).scalar_one_or_none()
     if not unit:
         raise HTTPException(status_code=404, detail="Not found")
@@ -198,11 +1001,10 @@ def get_unit(community_id: str, unit_id: str, db: Session = Depends(get_db)):
 
 
 @router.put("/communities/{community_id}/units/{unit_id}", response_model=UnitCrudResponse)
-def update_unit(community_id: str, unit_id: str, payload: UnitUpdateRequest, db: Session = Depends(get_db)):
+def update_unit(community_id: str, unit_id: str, payload: UnitUpdateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
     unit = db.execute(select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id == unit_id))).scalar_one_or_none()
     if not unit:
         raise HTTPException(status_code=404, detail="Not found")
-
     unit.va = payload.va
     db.commit()
     db.refresh(unit)
@@ -210,11 +1012,10 @@ def update_unit(community_id: str, unit_id: str, payload: UnitUpdateRequest, db:
 
 
 @router.delete("/communities/{community_id}/units/{unit_id}")
-def delete_unit(community_id: str, unit_id: str, db: Session = Depends(get_db)):
+def delete_unit(community_id: str, unit_id: str, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
     unit = db.execute(select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id == unit_id))).scalar_one_or_none()
     if not unit:
         raise HTTPException(status_code=404, detail="Not found")
-
     db.execute(Device.__table__.delete().where(Device.unit_id == unit.id))
     db.delete(unit)
     db.commit()
@@ -222,14 +1023,11 @@ def delete_unit(community_id: str, unit_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/communities/{community_id}/units/bulk-delete", response_model=BulkDeleteUnitsResponse)
-def bulk_delete_units(community_id: str, payload: BulkDeleteUnitsRequest, db: Session = Depends(get_db)):
+def bulk_delete_units(community_id: str, payload: BulkDeleteUnitsRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
     requested_ids = list(dict.fromkeys(payload.unit_ids))
-    rows = db.execute(
-        select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id.in_(requested_ids)))
-    ).scalars().all()
+    rows = db.execute(select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id.in_(requested_ids)))).scalars().all()
     found_map = {u.unit_id: u for u in rows}
     not_found = [u for u in requested_ids if u not in found_map]
-
     deleted_count = 0
     for unit_id in requested_ids:
         unit = found_map.get(unit_id)
@@ -238,214 +1036,159 @@ def bulk_delete_units(community_id: str, payload: BulkDeleteUnitsRequest, db: Se
         db.execute(Device.__table__.delete().where(Device.unit_id == unit.id))
         db.delete(unit)
         deleted_count += 1
-
     db.commit()
-    return BulkDeleteUnitsResponse(
-        community_id=community_id,
-        requested_count=len(requested_ids),
-        deleted_count=deleted_count,
-        not_found_unit_ids=not_found,
-    )
+    return BulkDeleteUnitsResponse(community_id=community_id, requested_count=len(requested_ids), deleted_count=deleted_count, not_found_unit_ids=not_found)
 
 
 @router.get("/units/{unit_id}/summary", response_model=UnitSummaryResponse)
-def unit_summary(unit_id: str, community_id: str, db: Session = Depends(get_db)):
+def unit_summary(unit_id: str, community_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
+    conditions = [EnergyReading.unit_id == unit_id, EnergyReading.community_id == community_id]
+    if current_user.role != UserRole.ADMIN:
+        conditions.append(EnergyReading.is_simulation.is_(False))
     total_kwh, estimated_cost, last_timestamp = db.execute(
-        select(
-            func.coalesce(func.sum(EnergyReading.kwh), 0.0),
-            func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0),
-            func.max(EnergyReading.timestamp),
-        ).where(and_(EnergyReading.unit_id == unit_id, EnergyReading.community_id == community_id))
+        select(func.coalesce(func.sum(EnergyReading.kwh), 0.0), func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0), func.max(EnergyReading.timestamp)).where(and_(*conditions))
     ).one()
-
-    return UnitSummaryResponse(
-        community_id=community_id,
-        unit_id=unit_id,
-        total_kwh=float(total_kwh),
-        estimated_cost=float(estimated_cost),
-        estimated_emission_kg_co2e=QueryService.emission(float(total_kwh)),
-        last_timestamp=last_timestamp,
-        is_fresh=QueryService.freshness(last_timestamp),
-    )
+    return UnitSummaryResponse(community_id=community_id, unit_id=unit_id, total_kwh=float(total_kwh), estimated_cost=float(estimated_cost), estimated_emission_kg_co2e=QueryService.emission(float(total_kwh)), last_timestamp=last_timestamp, is_fresh=QueryService.freshness(last_timestamp))
 
 
 @router.get("/communities/{community_id}/units-summary", response_model=list[CommunityUnitSummaryItem])
-def community_units_summary(community_id: str, db: Session = Depends(get_db)):
-    return build_units_summary(db, community_id)
+def community_units_summary(
+    community_id: str,
+    include_simulation: bool | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+    return build_units_summary(db, community_id, include_simulation=resolved_include_sim)
 
 
 @router.get("/communities/{community_id}/dashboard", response_model=DashboardResponse)
-def community_dashboard(community_id: str, db: Session = Depends(get_db)):
-    snapshot = build_dashboard_snapshot(db, community_id)
+def community_dashboard(
+    community_id: str,
+    include_simulation: bool | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+    snapshot = build_dashboard_snapshot(db, community_id, include_simulation=resolved_include_sim)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Not found")
     return snapshot
 
 
 @router.get("/communities/{community_id}/load-curve")
-def load_curve(community_id: str, db: Session = Depends(get_db)):
-    return build_load_curve(db, community_id)
+def load_curve(
+    community_id: str,
+    include_simulation: bool | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+    return build_load_curve(db, community_id, include_simulation=resolved_include_sim)
 
 
 @router.get("/communities/{community_id}/peak-risk", response_model=PeakRiskResponse)
-def peak_risk(community_id: str, db: Session = Depends(get_db)):
-    return build_peak_risk(db, community_id)
+def peak_risk(
+    community_id: str,
+    include_simulation: bool | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+    return build_peak_risk(db, community_id, include_simulation=resolved_include_sim)
 
 
 @router.get("/units/{unit_id}/devices")
-def unit_devices(unit_id: str, community_id: str, db: Session = Depends(get_db)):
+def unit_devices(unit_id: str, community_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
     unit = db.execute(select(Unit).where(and_(Unit.unit_id == unit_id, Unit.community_id == community_id))).scalar_one_or_none()
     if not unit:
         raise HTTPException(status_code=404, detail="Not found")
-
     rows = db.execute(select(Device).where(Device.unit_id == unit.id)).scalars().all()
     return [DeviceMetadataResponse(device_id=r.device_id, controllable=r.controllable, schedules=r.schedules).model_dump() for r in rows]
 
 
 @router.put("/units/{unit_id}/va")
-def update_unit_va(unit_id: str, payload: UnitVaUpdateRequest, community_id: str, db: Session = Depends(get_db)):
+def update_unit_va(unit_id: str, payload: UnitVaUpdateRequest, community_id: str, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
     unit = db.execute(select(Unit).where(and_(Unit.unit_id == unit_id, Unit.community_id == community_id))).scalar_one_or_none()
     if not unit:
         raise HTTPException(status_code=404, detail="Not found")
-
     unit.va = payload.va
     db.commit()
     db.refresh(unit)
     return {"community_id": community_id, "unit_id": unit_id, "va": unit.va}
 
 
+@router.post("/communities/{community_id}/notifications")
+def send_community_broadcast(community_id: str, payload: BroadcastRequest, current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
+    if current_user.role not in [UserRole.ADMIN, UserRole.COORDINATOR]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if current_user.role != UserRole.ADMIN:
+        broadcast_rate_limiter.check_and_increment(current_user.user_id, limit=5)
+    return {"status": "queued", "scope": "community", "community_id": community_id, "message": payload.message}
+
+
 @router.get("/ai/health")
-def ai_health():
+def ai_health(current_user: User = Depends(get_current_user)):
     return ai_orchestrator.client.health()
 
 
 @router.get("/ai/last-result")
-def ai_last_result(community_id: str):
+def ai_last_result(community_id: str, current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
     return ai_orchestrator.get_last_result(community_id=community_id)
 
 
 @router.get("/communities/{community_id}/ai-recommendations", response_model=AIRecommendationsResponse)
-def ai_recommendations(community_id: str, db: Session = Depends(get_db)):
-    row = db.execute(
-        select(AIAnalysisResult)
-        .where(AIAnalysisResult.community_id == community_id)
-        .order_by(desc(AIAnalysisResult.analyzed_at))
-    ).scalars().first()
-
+def ai_recommendations(community_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
+    row = db.execute(select(AIAnalysisResult).where(AIAnalysisResult.community_id == community_id).order_by(desc(AIAnalysisResult.analyzed_at))).scalars().first()
     if not row:
-        return AIRecommendationsResponse(
-            community_id=community_id,
-            exists=False,
-            analyzed_at=None,
-            status=None,
-            stale=True,
-            source="unknown",
-            recommendations=[],
-        )
-
+        return AIRecommendationsResponse(community_id=community_id, exists=False, analyzed_at=None, status=None, stale=True, source="unknown", recommendations=[])
     recs_raw = []
     if isinstance(row.result, dict):
         result_payload = row.result.get("result", row.result)
         if isinstance(result_payload, dict):
             recs_raw = result_payload.get("recommendations", []) or []
-
     recommendations: list[AIRecommendationItem] = []
     for rec in recs_raw:
-        if not isinstance(rec, dict):
-            continue
-        reasons = rec.get("reasons")
-        normalized_reasons = [str(x) for x in reasons if isinstance(x, str)] if isinstance(reasons, list) else []
-        recommendations.append(
-            AIRecommendationItem(
-                unit_id=rec.get("unit_id"),
-                device=rec.get("device"),
-                action=rec.get("action"),
-                saving=float(rec["saving"]) if isinstance(rec.get("saving"), (int, float)) else None,
-                co2_reduction=float(rec["co2_reduction"]) if isinstance(rec.get("co2_reduction"), (int, float)) else None,
-                estimated_reduction_kwh=float(rec["estimated_reduction_kwh"])
-                if isinstance(rec.get("estimated_reduction_kwh"), (int, float))
-                else None,
-                reasons=normalized_reasons,
-            )
-        )
-
-    return AIRecommendationsResponse(
-        community_id=community_id,
-        exists=True,
-        analyzed_at=row.analyzed_at.isoformat(),
-        status=row.status,
-        stale=bool(row.stale),
-        source=row.source or "unknown",
-        recommendations=recommendations,
-    )
+        if isinstance(rec, dict):
+            reasons = rec.get("reasons")
+            recommendations.append(AIRecommendationItem(unit_id=rec.get("unit_id"), device=rec.get("device"), action=rec.get("action"), saving=float(rec["saving"]) if isinstance(rec.get("saving"), (int, float)) else None, co2_reduction=float(rec["co2_reduction"]) if isinstance(rec.get("co2_reduction"), (int, float)) else None, estimated_reduction_kwh=float(rec["estimated_reduction_kwh"]) if isinstance(rec.get("estimated_reduction_kwh"), (int, float)) else None, reasons=[str(x) for x in reasons if isinstance(x, str)] if isinstance(reasons, list) else []))
+    return AIRecommendationsResponse(community_id=community_id, exists=True, analyzed_at=row.analyzed_at.isoformat(), status=row.status, stale=bool(row.stale), source=row.source or "unknown", recommendations=recommendations)
 
 
 @router.get("/ai/status", response_model=AIStatusResponse)
-def ai_status(community_id: str):
+def ai_status(community_id: str, current_user: User = Depends(get_current_user)):
+    ensure_community_access(community_id, current_user)
     return AIStatusResponse(**ai_orchestrator.get_status(community_id=community_id))
 
 
 @router.get("/ops/ingestion-status", response_model=IngestionStatusResponse)
-def ops_ingestion_status(db: Session = Depends(get_db)):
+def ops_ingestion_status(db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
     total_readings = int(db.execute(select(func.count(EnergyReading.id))).scalar_one())
     total_dead_letters = int(db.execute(select(func.count(DeadLetter.id))).scalar_one())
     communities_with_data = int(db.execute(select(func.count(func.distinct(EnergyReading.community_id)))).scalar_one())
-
     last_ingestion = db.execute(select(func.max(EnergyReading.timestamp))).scalar_one_or_none()
     last_dead_letter = db.execute(select(func.max(DeadLetter.created_at))).scalar_one_or_none()
-
-    rows = db.execute(
-        select(
-            EnergyReading.community_id,
-            func.count(EnergyReading.id).label("readings_count"),
-            func.max(EnergyReading.timestamp).label("last_ingestion_at"),
-        )
-        .group_by(EnergyReading.community_id)
-        .order_by(EnergyReading.community_id)
-    ).all()
-
-    per_community = [
-        IngestionPerCommunityItem(
-            community_id=r.community_id,
-            readings_count=int(r.readings_count),
-            last_ingestion_at=r.last_ingestion_at.isoformat() if r.last_ingestion_at else None,
-        )
-        for r in rows
-    ]
-
-    return IngestionStatusResponse(
-        mqtt={
-            "enabled": settings.enable_mqtt,
-            "host": settings.mqtt_host,
-            "port": settings.mqtt_port,
-        },
-        totals={
-            "energy_readings_count": total_readings,
-            "dead_letters_count": total_dead_letters,
-            "communities_with_data": communities_with_data,
-        },
-        latest={
-            "last_ingestion_at": last_ingestion.isoformat() if last_ingestion else None,
-            "last_dead_letter_at": last_dead_letter.isoformat() if last_dead_letter else None,
-        },
-        per_community=per_community,
-    )
+    rows = db.execute(select(EnergyReading.community_id, func.count(EnergyReading.id).label("readings_count"), func.max(EnergyReading.timestamp).label("last_ingestion_at")).group_by(EnergyReading.community_id).order_by(EnergyReading.community_id)).all()
+    per_community = [IngestionPerCommunityItem(community_id=r.community_id, readings_count=int(r.readings_count), last_ingestion_at=r.last_ingestion_at.isoformat() if r.last_ingestion_at else None) for r in rows]
+    return IngestionStatusResponse(mqtt={"enabled": settings.enable_mqtt, "host": settings.mqtt_host, "port": settings.mqtt_port}, totals={"energy_readings_count": total_readings, "dead_letters_count": total_dead_letters, "communities_with_data": communities_with_data}, latest={"last_ingestion_at": last_ingestion.isoformat() if last_ingestion else None, "last_dead_letter_at": last_dead_letter.isoformat() if last_dead_letter else None}, per_community=per_community)
 
 
 @router.get("/ops/dead-letters", response_model=DeadLettersListResponse)
-def ops_dead_letters(
-    offset: int = 0,
-    limit: int = 20,
-    topic: str | None = None,
-    reason_q: str | None = None,
-    sort_by: str = "created_at",
-    sort_order: str = "desc",
-    db: Session = Depends(get_db),
-):
-    limit = min(limit, 200)
+def ops_dead_letters(offset: int = 0, limit: int = 20, topic: str | None = None, reason_q: str | None = None, sort_by: str = "created_at", sort_order: str = "desc", db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
+    limit = _validate_pagination(offset, limit)
+    _validate_sort_order(sort_order)
+    _validate_sort_by(sort_by, {"created_at", "id"})
     stmt = select(DeadLetter)
     count_stmt = select(func.count(DeadLetter.id))
-
     if topic:
         stmt = stmt.where(DeadLetter.topic == topic)
         count_stmt = count_stmt.where(DeadLetter.topic == topic)
@@ -453,47 +1196,53 @@ def ops_dead_letters(
         pattern = f"%{reason_q}%"
         stmt = stmt.where(DeadLetter.reason.ilike(pattern))
         count_stmt = count_stmt.where(DeadLetter.reason.ilike(pattern))
-
     sort_map = {"created_at": DeadLetter.created_at, "id": DeadLetter.id}
     sort_col = sort_map.get(sort_by, DeadLetter.created_at)
     order_expr = desc(sort_col) if sort_order == "desc" else asc(sort_col)
-
     total = int(db.execute(count_stmt).scalar_one())
     rows = db.execute(stmt.order_by(order_expr).offset(offset).limit(limit)).scalars().all()
-
-    items = [
-        DeadLetterItem(
-            id=row.id,
-            topic=row.topic,
-            reason=row.reason,
-            raw_payload=row.raw_payload,
-            created_at=row.created_at.isoformat(),
-        )
-        for row in rows
-    ]
-    return {
-        "items": items,
-        "meta": {
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "has_next": (offset + limit) < total,
-        },
-    }
+    items = [DeadLetterItem(id=r.id, topic=r.topic, reason=r.reason, raw_payload=r.raw_payload, created_at=r.created_at.isoformat()) for r in rows]
+    return {"items": items, "meta": _meta(total, offset, limit)}
 
 
 @router.post("/ai/run-now")
-def ai_run_now(community_id: str | None = None):
+def ai_run_now(community_id: str | None = None, current_user: User = Depends(get_current_user)):
+    if current_user.role not in [UserRole.ADMIN, UserRole.COORDINATOR]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if current_user.role != UserRole.ADMIN:
+        broadcast_rate_limiter.check_and_increment(
+            current_user.user_id,
+            limit=12,
+            bucket="ai_run_now",
+            error_message="AI run-now limit exceeded",
+        )
     if community_id:
+        ensure_community_access(community_id, current_user)
         try:
             return ai_orchestrator.run_once_for_community(community_id=community_id, source="manual")
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return ai_orchestrator.run_once_all(source="manual")
+    if current_user.role == UserRole.ADMIN:
+        return ai_orchestrator.run_once_all(source="manual")
+    return ai_orchestrator.run_once_for_community(community_id=current_user.community_id or "", source="manual")
 
 
 @router.websocket("/ws/communities/{community_id}/dashboard")
 async def ws_community_dashboard(websocket: WebSocket, community_id: str):
+    token = websocket.query_params.get("token")
+    if not token:
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:]
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    payload = AuthService.decode(token)
+    role = payload.get("role")
+    token_community = payload.get("community_id")
+    if role != UserRole.ADMIN.value and token_community != community_id:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     await dashboard_ws_manager.connect(community_id, websocket)
     try:
         sent = await dashboard_ws_manager.send_snapshot(websocket, community_id)
@@ -501,9 +1250,7 @@ async def ws_community_dashboard(websocket: WebSocket, community_id: str):
             await websocket.send_json({"error": "Not found"})
             await websocket.close(code=1008)
             return
-
         while True:
-            # Keep connection alive and detect client disconnects.
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass

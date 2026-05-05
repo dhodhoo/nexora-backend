@@ -132,6 +132,7 @@ class DashboardResponse(BaseModel):
     load_curve: List[Dict[str, Any]]
     peak_risk: PeakRiskResponse
     ai_status: AIStatusResponse
+    include_simulation_used: bool = False
     generated_at: datetime
 
 
@@ -231,3 +232,234 @@ class StateQuery(BaseModel):
 
 
 JsonDict = Dict[str, Any]
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class AuthMeResponse(BaseModel):
+    user_id: str
+    full_name: str
+    email: str
+    role: str
+    status: str
+    community_id: Optional[str] = None
+    building_id: Optional[str] = None
+
+
+class MeDashboardUser(BaseModel):
+    user_id: str
+    full_name: str
+    email: str
+    role: str
+    status: str
+
+
+class MeDashboardScope(BaseModel):
+    community_id: Optional[str] = None
+    building_id: Optional[str] = None
+
+
+class MeDashboardResponse(BaseModel):
+    user: MeDashboardUser
+    scope: MeDashboardScope
+    widgets: Dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime
+
+
+class UserCreateRequest(BaseModel):
+    user_id: str
+    full_name: str
+    email: str
+    password: str
+    role: str
+    status: str = "PENDING"
+    community_id: Optional[str] = None
+    building_id: Optional[str] = None
+
+
+class UserUpdateRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    status: Optional[str] = None
+    community_id: Optional[str] = None
+    building_id: Optional[str] = None
+
+
+class UserResponse(BaseModel):
+    user_id: str
+    full_name: str
+    email: str
+    role: str
+    status: str
+    community_id: Optional[str] = None
+    building_id: Optional[str] = None
+
+
+class UsersListResponse(BaseModel):
+    items: List[UserResponse]
+    meta: ListMetaResponse
+
+
+class CommunityMemberItem(BaseModel):
+    user_id: str
+    full_name: str
+    email: str
+    role: str
+    status: str
+    community_id: Optional[str] = None
+
+
+class CommunityMembersListResponse(BaseModel):
+    items: List[CommunityMemberItem]
+    meta: ListMetaResponse
+
+
+class AddCommunityMemberRequest(BaseModel):
+    user_id: str
+
+
+class CommunityMemberMutationResponse(BaseModel):
+    community_id: str
+    user_id: str
+    status: str
+
+
+class CommunitySimulationStateResponse(BaseModel):
+    community_id: str
+    simulation_enabled: bool
+    updated_at: Optional[datetime] = None
+    source: str
+
+
+class CommunitySimulationToggleRequest(BaseModel):
+    simulation_enabled: bool
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str
+
+
+class BuildingCreateRequest(BaseModel):
+    building_id: str
+    name: Optional[str] = None
+
+
+class BuildingUpdateRequest(BaseModel):
+    name: Optional[str] = None
+
+
+class BuildingResponse(BaseModel):
+    building_id: str
+    name: Optional[str] = None
+
+
+class BuildingDetailResponse(BaseModel):
+    building_id: str
+    name: Optional[str] = None
+
+
+class BuildingsListResponse(BaseModel):
+    items: List[BuildingResponse]
+    meta: ListMetaResponse
+
+
+class BroadcastRequest(BaseModel):
+    message: str
+
+
+class BuildingUnitCreateRequest(BaseModel):
+    unit_id: str = Field(min_length=1, max_length=32)
+    is_active: bool = True
+    metadata_json: Optional[Dict[str, Any]] = None
+
+
+class BuildingUnitUpdateRequest(BaseModel):
+    is_active: Optional[bool] = None
+    metadata_json: Optional[Dict[str, Any]] = None
+
+
+class BuildingUnitResponse(BaseModel):
+    building_id: str
+    unit_id: str
+    is_active: bool
+    metadata_json: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BuildingUnitsListResponse(BaseModel):
+    items: List[BuildingUnitResponse]
+    meta: ListMetaResponse
+
+
+class BuildingReportMetadataResponse(BaseModel):
+    building_id: str
+    report_type: str
+    generated_at: datetime
+    period: Dict[str, Optional[str]]
+    summary: Dict[str, Any]
+    download_url: Optional[str] = None
+
+
+class BuildingConsumptionPoint(BaseModel):
+    bucket: str
+    total_kwh: float
+    estimated_cost: float
+
+
+class BuildingConsumptionResponse(BaseModel):
+    building_id: str
+    series: List[BuildingConsumptionPoint]
+    total_kwh: float
+    estimated_cost: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
+class BuildingPredictionsResponse(BaseModel):
+    building_id: str
+    exists: bool
+    generated_at: Optional[str] = None
+    community_context: Dict[str, Any] = Field(default_factory=dict)
+    unit_predictions: Dict[str, float] = Field(default_factory=dict)
+
+
+class BuildingRecommendationItem(BaseModel):
+    unit_id: Optional[str] = None
+    device: Optional[str] = None
+    action: Optional[str] = None
+    saving: Optional[float] = None
+    co2_reduction: Optional[float] = None
+    estimated_reduction_kwh: Optional[float] = None
+    reasons: List[str] = Field(default_factory=list)
+
+
+class BuildingRecommendationsResponse(BaseModel):
+    building_id: str
+    exists: bool
+    generated_at: Optional[str] = None
+    items: List[BuildingRecommendationItem] = Field(default_factory=list)
+
+
+class BuildingConfigResponse(BaseModel):
+    building_id: str
+    peak_threshold_kwh: float
+    source: str
+
+
+class BuildingConfigUpdateRequest(BaseModel):
+    peak_threshold_kwh: float = Field(gt=0)

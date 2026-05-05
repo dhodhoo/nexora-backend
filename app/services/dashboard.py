@@ -30,17 +30,20 @@ def _risk_label(peak_kwh: float) -> str:
     return "normal"
 
 
-def build_units_summary(db: Session, community_id: str) -> list[CommunityUnitSummaryItem]:
+def build_units_summary(db: Session, community_id: str, include_simulation: bool = False) -> list[CommunityUnitSummaryItem]:
     units = db.execute(select(Unit).where(Unit.community_id == community_id).order_by(Unit.unit_id)).scalars().all()
     summaries: list[CommunityUnitSummaryItem] = []
 
     for unit in units:
+        conditions = [EnergyReading.unit_id == unit.unit_id, EnergyReading.community_id == community_id]
+        if not include_simulation:
+            conditions.append(EnergyReading.is_simulation.is_(False))
         total_kwh, estimated_cost, last_timestamp = db.execute(
             select(
                 func.coalesce(func.sum(EnergyReading.kwh), 0.0),
                 func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0),
                 func.max(EnergyReading.timestamp),
-            ).where(and_(EnergyReading.unit_id == unit.unit_id, EnergyReading.community_id == community_id))
+            ).where(and_(*conditions))
         ).one()
 
         summaries.append(
@@ -58,28 +61,34 @@ def build_units_summary(db: Session, community_id: str) -> list[CommunityUnitSum
     return summaries
 
 
-def build_load_curve(db: Session, community_id: str) -> list[dict[str, Any]]:
+def build_load_curve(db: Session, community_id: str, include_simulation: bool = False) -> list[dict[str, Any]]:
     bucket_expr = func.to_char(func.date_trunc("hour", EnergyReading.timestamp), "YYYY-MM-DD\"T\"HH24:00:00")
+    conditions = [EnergyReading.community_id == community_id]
+    if not include_simulation:
+        conditions.append(EnergyReading.is_simulation.is_(False))
     rows = db.execute(
         select(
             bucket_expr.label("bucket"),
             func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
         )
-        .where(EnergyReading.community_id == community_id)
+        .where(and_(*conditions))
         .group_by(bucket_expr)
         .order_by(bucket_expr)
     ).all()
     return [{"bucket": r.bucket, "total_kwh": float(r.total_kwh)} for r in rows]
 
 
-def build_peak_risk(db: Session, community_id: str) -> PeakRiskResponse:
+def build_peak_risk(db: Session, community_id: str, include_simulation: bool = False) -> PeakRiskResponse:
     bucket_expr = func.to_char(func.date_trunc("hour", EnergyReading.timestamp), "YYYY-MM-DD\"T\"HH24:00:00")
+    conditions = [EnergyReading.community_id == community_id]
+    if not include_simulation:
+        conditions.append(EnergyReading.is_simulation.is_(False))
     row = db.execute(
         select(
             bucket_expr.label("bucket"),
             func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
         )
-        .where(EnergyReading.community_id == community_id)
+        .where(and_(*conditions))
         .group_by(bucket_expr)
         .order_by(desc("total_kwh"))
     ).first()
@@ -96,14 +105,14 @@ def build_peak_risk(db: Session, community_id: str) -> PeakRiskResponse:
     )
 
 
-def build_dashboard_snapshot(db: Session, community_id: str) -> DashboardResponse | None:
+def build_dashboard_snapshot(db: Session, community_id: str, include_simulation: bool = False) -> DashboardResponse | None:
     community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
     if not community:
         return None
 
-    units_summary = build_units_summary(db, community_id)
-    load_curve = build_load_curve(db, community_id)
-    peak_risk = build_peak_risk(db, community_id)
+    units_summary = build_units_summary(db, community_id, include_simulation=include_simulation)
+    load_curve = build_load_curve(db, community_id, include_simulation=include_simulation)
+    peak_risk = build_peak_risk(db, community_id, include_simulation=include_simulation)
     ai_status = AIStatusResponse(**ai_orchestrator.get_status(community_id=community_id))
 
     total_kwh = float(sum(item.total_kwh for item in units_summary))
@@ -128,5 +137,6 @@ def build_dashboard_snapshot(db: Session, community_id: str) -> DashboardRespons
         load_curve=load_curve,
         peak_risk=peak_risk,
         ai_status=ai_status,
+        include_simulation_used=include_simulation,
         generated_at=utc_now(),
     )

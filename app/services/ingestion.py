@@ -77,6 +77,7 @@ class IngestionService:
                 power_watt=event.power_watt,
                 tariff_per_kwh=tariff,
                 estimated_cost=float(kwh) * tariff,
+                is_simulation=bool(payload.get("is_simulation", False)),
                 raw_payload=payload,
             )
             db.add(reading)

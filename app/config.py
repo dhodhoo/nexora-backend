@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     ai_timeout_seconds: float = 8.0
     ai_retry_count: int = 2
     ai_scheduler_interval_seconds: int = 3600
+    jwt_secret_key: str = "change-this-secret-in-production"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+    refresh_token_expire_minutes: int = 10080
+    auth_enabled: bool = True
+    redis_url: Optional[str] = None
+    bootstrap_admin_email: str = "admin@nexora.local"
+    bootstrap_admin_password: str = "admin12345"
 
 
 settings = Settings()
