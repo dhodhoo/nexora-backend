@@ -85,6 +85,7 @@ class IngestionService:
             print(f"[INGEST][RECEIVED] topic={topic} unit={event.unit_id} device={event.device_id}")
             try:
                 dashboard_ws_manager.notify_community_update(event.community_id)
+                dashboard_ws_manager.notify_unit_update(event.community_id, event.unit_id)
             except Exception as notify_exc:
                 print(f"[WS][NOTIFY_FAILED] community={event.community_id} reason={notify_exc}")
         except IntegrityError:

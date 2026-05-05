@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Community, EnergyReading, Unit
-from app.schemas import AIStatusResponse, CommunityUnitSummaryItem, DashboardCommunitySummary, DashboardResponse, PeakRiskResponse
+from app.schemas import AIStatusResponse, CommunityUnitSummaryItem, DashboardCommunitySummary, DashboardResponse, PeakRiskResponse, UnitDashboardResponse, UnitDashboardSummary
 from app.services.ai_integration import ai_orchestrator
 from app.services.ai_recommendations import get_latest_ai_result, parse_recommendations, recommendations_map_by_unit
 from app.utils.time import utc_now
@@ -145,5 +145,86 @@ def build_dashboard_snapshot(db: Session, community_id: str, include_simulation:
         ai_status=ai_status,
         unit_ai_recommendations=unit_ai_recommendations,
         include_simulation_used=include_simulation,
+        generated_at=utc_now(),
+    )
+
+
+def build_unit_dashboard_snapshot(
+    db: Session,
+    community_id: str,
+    unit_id: str,
+    include_simulation: bool = False,
+) -> UnitDashboardResponse | None:
+    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community:
+        return None
+    unit = db.execute(select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id == unit_id))).scalar_one_or_none()
+    if not unit:
+        return None
+
+    conditions = [EnergyReading.community_id == community_id, EnergyReading.unit_id == unit_id]
+    if not include_simulation:
+        conditions.append(EnergyReading.is_simulation.is_(False))
+
+    total_kwh, estimated_cost, last_timestamp = db.execute(
+        select(
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0),
+            func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0),
+            func.max(EnergyReading.timestamp),
+        ).where(and_(*conditions))
+    ).one()
+
+    unit_summary = UnitDashboardSummary(
+        community_id=community_id,
+        unit_id=unit_id,
+        va=unit.va,
+        total_kwh=float(total_kwh),
+        estimated_cost=float(estimated_cost),
+        estimated_emission_kg_co2e=_emission(float(total_kwh)),
+        last_timestamp=last_timestamp,
+        is_fresh=_freshness(last_timestamp),
+    )
+
+    bucket_expr = func.to_char(func.date_trunc("hour", EnergyReading.timestamp), "YYYY-MM-DD\"T\"HH24:00:00")
+    rows = db.execute(
+        select(
+            bucket_expr.label("bucket"),
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+        )
+        .where(and_(*conditions))
+        .group_by(bucket_expr)
+        .order_by(bucket_expr)
+    ).all()
+    load_curve = [{"bucket": r.bucket, "total_kwh": float(r.total_kwh)} for r in rows]
+
+    peak_row = db.execute(
+        select(
+            bucket_expr.label("bucket"),
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+        )
+        .where(and_(*conditions))
+        .group_by(bucket_expr)
+        .order_by(desc("total_kwh"))
+    ).first()
+    if peak_row:
+        peak_risk = PeakRiskResponse(
+            community_id=community_id,
+            peak_hour=peak_row.bucket,
+            peak_kwh=float(peak_row.total_kwh),
+            risk_level=_risk_label(float(peak_row.total_kwh)),
+        )
+    else:
+        peak_risk = PeakRiskResponse(community_id=community_id, peak_hour=None, peak_kwh=0.0, risk_level="normal")
+
+    ai_row = get_latest_ai_result(db, community_id)
+    unit_recs = [rec.model_dump() for rec in parse_recommendations(ai_row) if rec.unit_id == unit_id]
+
+    return UnitDashboardResponse(
+        community_id=community_id,
+        unit_id=unit_id,
+        unit_summary=unit_summary,
+        load_curve=load_curve,
+        peak_risk=peak_risk,
+        ai_recommendations=unit_recs,
         generated_at=utc_now(),
     )

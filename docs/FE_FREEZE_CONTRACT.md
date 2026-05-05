@@ -20,6 +20,8 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
 3. `GET /communities/{community_id}/ai-recommendations`
 4. `GET /units/{unit_id}/ai-recommendations?community_id=...`
 4. `WS /ws/communities/{community_id}/dashboard`
+5. `GET /communities/{community_id}/units/{unit_id}/dashboard`
+6. `WS /ws/communities/{community_id}/units/{unit_id}/dashboard`
 
 ### C. Management Views
 - Communities list: `GET /communities`
@@ -35,6 +37,7 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
   - `DELETE /units/{unit_id}/devices/{device_id}?community_id=...`
 - Device control:
   - `POST /units/{unit_id}/devices/{device_id}/control?community_id=...`
+  - note: jika `qty > 1`, action berlaku ke semua instance device di unit tersebut.
 - Notifications:
   - `POST /communities/{community_id}/notifications`
   - `POST /buildings/{building_id}/notifications`
@@ -62,6 +65,13 @@ Field wajib:
 - `unit_ai_recommendations`
 - `include_simulation_used`
 - `generated_at`
+
+### Unit Device Card (per unit)
+Field wajib item device:
+- `device_id`
+- `qty` (integer >= 1)
+- `controllable`
+- `schedules`
 
 ### `/communities/{id}/ai-recommendations`
 Field wajib:
@@ -126,3 +136,4 @@ Field wajib:
 5. Ambil `/communities/{id}/ai-recommendations`.
 6. Connect WebSocket dashboard untuk realtime update.
 7. Jika WS disconnect, fallback ke polling dashboard.
+8. Untuk halaman fokus unit: panggil `/communities/{id}/units/{unit_id}/dashboard` lalu subscribe WS unit route.

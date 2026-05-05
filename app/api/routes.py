@@ -9,7 +9,7 @@ from sqlalchemy import and_, asc, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models import AIAnalysisResult, AuditLog, Building, BuildingConfig, BuildingUnit, Community, CommunitySimulationConfig, DeadLetter, Device, DeviceCatalog, DeviceCommand, EnergyReading, Notification, NotificationDelivery, RevokedToken, Unit, User, UserRole, UserStatus
 from app.schemas import (
     AddCommunityMemberRequest,
@@ -68,6 +68,7 @@ from app.schemas import (
     TokenResponse,
     UnitCreateRequest,
     UnitDeviceCreateRequest,
+    UnitDashboardResponse,
     UnitDeviceResponse,
     UnitDevicesListResponse,
     UnitDeviceUpdateRequest,
@@ -88,7 +89,7 @@ from app.schemas import (
 from app.services.ai_integration import ai_orchestrator
 from app.services.ai_recommendations import get_latest_ai_result, parse_recommendations
 from app.services.auth import AuthService, ensure_building_access, ensure_community_access, get_current_user, require_roles
-from app.services.dashboard import build_dashboard_snapshot, build_load_curve, build_peak_risk, build_units_summary
+from app.services.dashboard import build_dashboard_snapshot, build_load_curve, build_peak_risk, build_units_summary, build_unit_dashboard_snapshot
 from app.services.device_control import publish_device_command
 from app.services.ingestion import QueryService
 from app.services.rate_limit import broadcast_rate_limiter
@@ -1272,6 +1273,22 @@ def community_dashboard(
     return snapshot
 
 
+@router.get("/communities/{community_id}/units/{unit_id}/dashboard", response_model=UnitDashboardResponse)
+def unit_dashboard(
+    community_id: str,
+    unit_id: str,
+    include_simulation: bool | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+    snapshot = build_unit_dashboard_snapshot(db, community_id, unit_id, include_simulation=resolved_include_sim)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return snapshot
+
+
 @router.get("/communities/{community_id}/load-curve")
 def load_curve(
     community_id: str,
@@ -1460,7 +1477,7 @@ def unit_devices(
     unit = _ensure_unit_operation_access(db, current_user, community_id, unit_id)
     total = int(db.execute(select(func.count(Device.id)).where(Device.unit_id == unit.id)).scalar_one())
     rows = db.execute(select(Device).where(Device.unit_id == unit.id).order_by(Device.device_id).offset(offset).limit(limit)).scalars().all()
-    items = [UnitDeviceResponse(device_id=r.device_id, controllable=r.controllable, schedules=r.schedules) for r in rows]
+    items = [UnitDeviceResponse(device_id=r.device_id, qty=r.qty, controllable=r.controllable, schedules=r.schedules) for r in rows]
     return {"items": items, "meta": _meta(total, offset, limit)}
 
 
@@ -1476,10 +1493,10 @@ def unit_device_create(
     exists = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == payload.device_id))).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="Device already exists on this unit")
-    row = Device(unit_id=unit.id, device_id=payload.device_id, controllable=payload.controllable, schedules=payload.schedules)
+    row = Device(unit_id=unit.id, device_id=payload.device_id, qty=payload.qty, controllable=payload.controllable, schedules=payload.schedules)
     db.add(row)
     db.commit()
-    return UnitDeviceResponse(device_id=row.device_id, controllable=row.controllable, schedules=row.schedules)
+    return UnitDeviceResponse(device_id=row.device_id, qty=row.qty, controllable=row.controllable, schedules=row.schedules)
 
 
 @router.put("/units/{unit_id}/devices/{device_id}", response_model=UnitDeviceResponse)
@@ -1495,12 +1512,14 @@ def unit_device_update(
     row = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == device_id))).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
+    if payload.qty is not None:
+        row.qty = payload.qty
     if payload.controllable is not None:
         row.controllable = payload.controllable
     if payload.schedules is not None:
         row.schedules = payload.schedules
     db.commit()
-    return UnitDeviceResponse(device_id=row.device_id, controllable=row.controllable, schedules=row.schedules)
+    return UnitDeviceResponse(device_id=row.device_id, qty=row.qty, controllable=row.controllable, schedules=row.schedules)
 
 
 @router.delete("/units/{unit_id}/devices/{device_id}")
@@ -1543,6 +1562,7 @@ def unit_device_control(
         "community_id": community_id,
         "unit_id": unit_id,
         "device_id": device_id,
+        "device_qty": row.qty,
         "action": payload.action,
         "requested_at": utc_now().isoformat(),
     }
@@ -1808,3 +1828,45 @@ async def ws_community_dashboard(websocket: WebSocket, community_id: str):
         pass
     finally:
         await dashboard_ws_manager.disconnect(community_id, websocket)
+
+
+@router.websocket("/ws/communities/{community_id}/units/{unit_id}/dashboard")
+async def ws_unit_dashboard(websocket: WebSocket, community_id: str, unit_id: str):
+    token = websocket.query_params.get("token")
+    if not token:
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:]
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    payload = AuthService.decode(token)
+    user_id = payload.get("sub")
+    db = SessionLocal()
+    try:
+        user = db.execute(select(User).where(User.user_id == user_id)).scalar_one_or_none()
+        if not user:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        try:
+            _ensure_unit_operation_access(db, user, community_id, unit_id)
+        except HTTPException:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+    finally:
+        db.close()
+
+    await dashboard_ws_manager.connect_unit(community_id, unit_id, websocket)
+    try:
+        sent = await dashboard_ws_manager.send_unit_snapshot(websocket, community_id, unit_id)
+        if not sent:
+            await websocket.send_json({"error": "Not found"})
+            await websocket.close(code=1008)
+            return
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await dashboard_ws_manager.disconnect_unit(community_id, unit_id, websocket)

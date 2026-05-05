@@ -137,6 +137,27 @@ class DashboardResponse(BaseModel):
     generated_at: datetime
 
 
+class UnitDashboardSummary(BaseModel):
+    community_id: str
+    unit_id: str
+    va: int
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
+class UnitDashboardResponse(BaseModel):
+    community_id: str
+    unit_id: str
+    unit_summary: UnitDashboardSummary
+    load_curve: List[Dict[str, Any]]
+    peak_risk: PeakRiskResponse
+    ai_recommendations: List[Dict[str, Any]] = Field(default_factory=list)
+    generated_at: datetime
+
+
 class AIRecommendationItem(BaseModel):
     unit_id: Optional[str] = None
     device: Optional[str] = None
@@ -537,17 +558,20 @@ class DeviceCatalogListResponse(BaseModel):
 
 class UnitDeviceCreateRequest(BaseModel):
     device_id: str = Field(min_length=1, max_length=64)
+    qty: int = Field(default=1, ge=1)
     controllable: bool = True
     schedules: Optional[List[Dict[str, Any]]] = None
 
 
 class UnitDeviceUpdateRequest(BaseModel):
+    qty: Optional[int] = Field(default=None, ge=1)
     controllable: Optional[bool] = None
     schedules: Optional[List[Dict[str, Any]]] = None
 
 
 class UnitDeviceResponse(BaseModel):
     device_id: str
+    qty: int
     controllable: bool
     schedules: Optional[List[Dict[str, Any]]] = None
 

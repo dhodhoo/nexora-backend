@@ -1074,6 +1074,38 @@ Response `200`:
 }
 ```
 
+#### `GET /communities/{community_id}/units/{unit_id}/dashboard`
+- Tujuan: payload dashboard fokus 1 unit.
+- Auth: Protected (scope community + unit access).
+- Query opsional: `include_simulation=true|false`.
+
+Response `200`:
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "unit_summary": {
+    "community_id": "C01",
+    "unit_id": "U01",
+    "va": 2200,
+    "total_kwh": 3.2,
+    "estimated_cost": 4620.8,
+    "estimated_emission_kg_co2e": 2.72,
+    "last_timestamp": "2026-05-05T19:00:00",
+    "is_fresh": true
+  },
+  "load_curve": [],
+  "peak_risk": {
+    "community_id": "C01",
+    "peak_hour": null,
+    "peak_kwh": 0.0,
+    "risk_level": "normal"
+  },
+  "ai_recommendations": [],
+  "generated_at": "2026-05-05T19:00:00+00:00"
+}
+```
+
 #### `GET /communities/{community_id}/load-curve`
 - Tujuan: kurva beban per jam.
 - Auth: Protected (scope check community).
@@ -1124,6 +1156,7 @@ Response `200`:
 #### `GET /units/{unit_id}/devices?community_id={community_id}`
 - Tujuan: list device per unit.
 - Auth: Protected (scope role-based per unit).
+- Catatan: setiap item sekarang punya field `qty` (jumlah perangkat sejenis dalam unit).
 
 Response `200`:
 ```json
@@ -1131,6 +1164,7 @@ Response `200`:
   "items": [
     {
       "device_id": "ac",
+      "qty": 2,
       "controllable": true,
       "schedules": [
         {
@@ -1152,10 +1186,12 @@ Response `200`:
 #### `POST /units/{unit_id}/devices?community_id={community_id}`
 - Tujuan: tambah device ke unit.
 - Auth: Protected (admin/coordinator/building_manager/resident pada scope unit yang diizinkan).
+- Body menerima `qty` (opsional, default `1`, minimal `1`).
 
 #### `PUT /units/{unit_id}/devices/{device_id}?community_id={community_id}`
 - Tujuan: update metadata device unit.
 - Auth: Protected (scope role-based).
+- Dapat update `qty` (`>=1`) selain metadata lain.
 
 #### `DELETE /units/{unit_id}/devices/{device_id}?community_id={community_id}`
 - Tujuan: hapus device dari unit.
@@ -1164,6 +1200,7 @@ Response `200`:
 #### `POST /units/{unit_id}/devices/{device_id}/control?community_id={community_id}`
 - Tujuan: kontrol device nyata (`action=on|off`) dan publish command ke MQTT.
 - Auth: Protected (scope role-based).
+- Untuk `qty > 1`, command berlaku ke seluruh instance device tersebut.
 
 Body:
 ```json
@@ -1479,6 +1516,29 @@ Payload pertama saat connect (initial snapshot):
 
 Jika unauthorized atau scope tidak cocok:
 - koneksi ditutup dengan policy violation.
+
+#### `WS /ws/communities/{community_id}/units/{unit_id}/dashboard`
+- Tujuan: stream snapshot realtime fokus 1 unit.
+- Auth: wajib token (query `token` atau header bearer).
+- Scope: non-admin harus lolos scope community + unit.
+
+Payload awal:
+```json
+{
+  "type": "unit_dashboard_snapshot",
+  "community_id": "C01",
+  "unit_id": "U01",
+  "data": {
+    "community_id": "C01",
+    "unit_id": "U01",
+    "unit_summary": {},
+    "load_curve": [],
+    "peak_risk": {},
+    "ai_recommendations": [],
+    "generated_at": "2026-05-05T19:00:00+00:00"
+  }
+}
+```
 
 ---
 

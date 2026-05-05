@@ -312,6 +312,72 @@ def test_ws_dashboard_realtime_update():
             assert msg["community_id"] == "C01"
 
 
+def test_unit_dashboard_contract():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "C01").first():
+        db.add(Community(community_id="C01", name="Community 01"))
+    if not db.query(Unit).filter(Unit.community_id == "C01", Unit.unit_id == "U01").first():
+        db.add(Unit(community_id="C01", unit_id="U01", va=1300))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.get("/communities/C01/units/U01/dashboard", headers=headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["community_id"] == "C01"
+        assert body["unit_id"] == "U01"
+        assert "unit_summary" in body
+        assert "load_curve" in body
+        assert "peak_risk" in body
+        assert "ai_recommendations" in body
+        assert "generated_at" in body
+
+
+def test_ws_unit_dashboard_initial_and_update_isolation():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "C01").first():
+        db.add(Community(community_id="C01", name="Community 01"))
+    if not db.query(Unit).filter(Unit.community_id == "C01", Unit.unit_id == "U01").first():
+        db.add(Unit(community_id="C01", unit_id="U01", va=1300))
+    if not db.query(Unit).filter(Unit.community_id == "C01", Unit.unit_id == "U02").first():
+        db.add(Unit(community_id="C01", unit_id="U02", va=1300))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        token = headers["Authorization"].split(" ", 1)[1]
+        with client.websocket_connect(f"/ws/communities/C01/units/U01/dashboard?token={token}") as ws_u01:
+            with client.websocket_connect(f"/ws/communities/C01/units/U02/dashboard?token={token}") as ws_u02:
+                m1 = ws_u01.receive_json()
+                m2 = ws_u02.receive_json()
+                assert m1["type"] == "unit_dashboard_snapshot"
+                assert m1["unit_id"] == "U01"
+                assert m2["type"] == "unit_dashboard_snapshot"
+                assert m2["unit_id"] == "U02"
+
+                db = SessionLocal()
+                IngestionService.ingest_event(
+                    db,
+                    {
+                        "community_id": "C01",
+                        "unit_id": "U01",
+                        "device_id": "ac",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "kwh": 0.4,
+                        "controllable": True,
+                    },
+                    "energy/C01/U01/consumption",
+                )
+                db.close()
+
+                upd = ws_u01.receive_json()
+                assert upd["type"] == "unit_dashboard_snapshot"
+                assert upd["unit_id"] == "U01"
+
+
 def test_ai_recommendations_contract_exists_false():
     with TestClient(app) as client:
         headers = _auth_headers(client)
@@ -1084,3 +1150,63 @@ def test_notifications_device_catalog_device_control_and_csv_export():
         )
         assert b_export.status_code == 200
         assert "text/csv" in b_export.headers.get("content-type", "")
+
+
+def test_unit_device_qty_contract_and_validation():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CQTY").first():
+        db.add(Community(community_id="CQTY", name="Community Qty"))
+    if not db.query(Unit).filter(Unit.community_id == "CQTY", Unit.unit_id == "UQTY").first():
+        db.add(Unit(community_id="CQTY", unit_id="UQTY", va=2200))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        create_default = client.post(
+            "/units/UQTY/devices",
+            params={"community_id": "CQTY"},
+            json={"device_id": "lamp-qty", "controllable": True},
+            headers=headers,
+        )
+        assert create_default.status_code in (200, 400)
+        if create_default.status_code == 200:
+            assert create_default.json()["qty"] == 1
+
+        update_qty = client.put(
+            "/units/UQTY/devices/lamp-qty",
+            params={"community_id": "CQTY"},
+            json={"qty": 3},
+            headers=headers,
+        )
+        assert update_qty.status_code == 200
+        assert update_qty.json()["qty"] == 3
+
+        list_devices = client.get(
+            "/units/UQTY/devices",
+            params={"community_id": "CQTY", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert list_devices.status_code == 200
+        items = list_devices.json()["items"]
+        target = next((x for x in items if x["device_id"] == "lamp-qty"), None)
+        assert target is not None
+        assert target["qty"] == 3
+
+        invalid_qty = client.post(
+            "/units/UQTY/devices",
+            params={"community_id": "CQTY"},
+            json={"device_id": "invalid-qty", "qty": 0, "controllable": True},
+            headers=headers,
+        )
+        assert invalid_qty.status_code == 400
+
+        control_qty = client.post(
+            "/units/UQTY/devices/lamp-qty/control",
+            params={"community_id": "CQTY"},
+            json={"action": "off"},
+            headers=headers,
+        )
+        assert control_qty.status_code == 200
+        assert control_qty.json()["status"] in ("sent", "failed")
