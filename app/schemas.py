@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DeviceSchedule(BaseModel):
@@ -27,12 +27,20 @@ class RecommendationCompliance(BaseModel):
     window_hours: int = 24
 
 
+class DeviceEmissionItem(BaseModel):
+    device_id: str
+    device_name: str
+    total_kwh: float
+    estimated_emission_kg_co2e: float
+
+
 class UnitSummaryResponse(BaseModel):
     community_id: str
     unit_id: str
     total_kwh: float
     estimated_cost: float
     estimated_emission_kg_co2e: float
+    device_emissions: List[DeviceEmissionItem] = Field(default_factory=list)
     last_timestamp: Optional[datetime]
     is_fresh: bool
     period_used: str = "all"
@@ -199,6 +207,23 @@ class UnitDashboardResponse(BaseModel):
     comparison: Optional[PeriodComparison] = None
     recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
     generated_at: datetime
+
+
+class UnitDailyEmissionPoint(BaseModel):
+    date: str
+    total_kwh: float
+    estimated_emission_kg_co2e: float
+
+
+class UnitDailyEmissionsResponse(BaseModel):
+    community_id: str
+    unit_id: str
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    series: List[UnitDailyEmissionPoint] = Field(default_factory=list)
+    total_emission_kg_co2e: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
 
 
 class AIRecommendationItem(BaseModel):
@@ -615,12 +640,16 @@ class DeviceCatalogListResponse(BaseModel):
 class UnitDeviceCreateRequest(BaseModel):
     device_id: str = Field(min_length=1, max_length=64)
     qty: int = Field(default=1, ge=1)
+    is_active: bool = True
     controllable: bool = True
     schedules: Optional[List[Dict[str, Any]]] = None
 
 
 class UnitDeviceUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     qty: Optional[int] = Field(default=None, ge=1)
+    is_active: Optional[bool] = None
     controllable: Optional[bool] = None
     schedules: Optional[List[Dict[str, Any]]] = None
 
@@ -629,6 +658,7 @@ class UnitDeviceResponse(BaseModel):
     device_id: str
     device_name: str
     qty: int
+    is_active: bool
     controllable: bool
     schedules: Optional[List[Dict[str, Any]]] = None
 

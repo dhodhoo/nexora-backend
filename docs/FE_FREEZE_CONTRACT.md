@@ -19,9 +19,11 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
 2. `GET /communities/{community_id}/dashboard`
 3. `GET /communities/{community_id}/ai-recommendations`
 4. `GET /units/{unit_id}/ai-recommendations?community_id=...`
-4. `WS /ws/communities/{community_id}/dashboard`
-5. `GET /communities/{community_id}/units/{unit_id}/dashboard`
-6. `WS /ws/communities/{community_id}/units/{unit_id}/dashboard`
+5. `GET /units/{unit_id}/summary?community_id=...`
+6. `GET /units/{unit_id}/emissions/daily?community_id=...`
+7. `WS /ws/communities/{community_id}/dashboard`
+8. `GET /communities/{community_id}/units/{unit_id}/dashboard`
+9. `WS /ws/communities/{community_id}/units/{unit_id}/dashboard`
 - Untuk analytics periodik, endpoint dashboard/summary mendukung query `period=all|month|week` (default `all`).
 - Untuk `period=month|week`, response juga menyertakan blok `comparison` (persen konsumsi/tagihan/emisi vs periode sebelumnya). Jika periode sebelumnya nol, nilai persen akan `null`.
 - Semua endpoint analytics utama juga menyertakan blok `recommendation_compliance`:
@@ -81,8 +83,29 @@ Field wajib item device:
 - `device_id`
 - `device_name` (dari catalog, fallback ke `device_id`)
 - `qty` (integer >= 1)
+- `is_active` (boolean status operasional; jika `false`, control ditolak backend)
 - `controllable`
 - `schedules`
+- Catatan integrasi: saat update device, kirim field `schedules` (plural). Field typo seperti `schedule` akan ditolak `400`.
+
+### `/units/{unit_id}/summary`
+Field wajib:
+- `estimated_emission_kg_co2e`
+- `device_emissions[]`
+- `device_emissions[].device_id`
+- `device_emissions[].device_name`
+- `device_emissions[].total_kwh`
+- `device_emissions[].estimated_emission_kg_co2e`
+
+### `/units/{unit_id}/emissions/daily`
+Field wajib:
+- `community_id`
+- `unit_id`
+- `period_used`
+- `series[]`
+- `series[].date`
+- `series[].estimated_emission_kg_co2e`
+- `total_emission_kg_co2e`
 
 ### Notifications List
 Field wajib:

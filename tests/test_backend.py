@@ -45,7 +45,7 @@ from fastapi.testclient import TestClient
 
 from app.database import Base, SessionLocal, engine
 from app.main import app
-from app.models import AIAnalysisResult, Building, BuildingUnit, Community, DeviceCommand, Unit, User
+from app.models import AIAnalysisResult, Building, BuildingUnit, Community, DeviceCatalog, DeviceCommand, Unit, User
 from app.services.ai_integration import ai_orchestrator
 from app.services.ingestion import IngestionService
 from app.utils.time import utc_now
@@ -88,6 +88,8 @@ def test_ingestion_and_unit_summary():
         "schedules": [{"start_hour": 18, "end_hour": 22}],
     }
     IngestionService.ingest_event(db, payload, "energy/C01/U01/consumption")
+    db.add(DeviceCatalog(device_key="ac", display_name="Air Conditioner", controllable=True, is_active=True))
+    db.commit()
     db.close()
 
     with TestClient(app) as client:
@@ -95,6 +97,54 @@ def test_ingestion_and_unit_summary():
         res = client.get("/units/U01/summary", params={"community_id": "C01"}, headers=headers)
         assert res.status_code == 200
         assert res.json()["total_kwh"] >= 1.2
+        assert "device_emissions" in res.json()
+        assert len(res.json()["device_emissions"]) == 1
+        assert res.json()["device_emissions"][0]["device_name"] == "Air Conditioner"
+
+
+def test_unit_daily_emissions_endpoint():
+    db = SessionLocal()
+    community = Community(community_id="CDE", name="Community Daily Emission")
+    db.add(community)
+    unit = Unit(community_id="CDE", unit_id="UDE", va=1300)
+    db.add(unit)
+    db.commit()
+
+    base = datetime.now(timezone.utc)
+    payloads = [
+        {
+            "community_id": "CDE",
+            "unit_id": "UDE",
+            "device_id": "ac",
+            "timestamp": (base - timedelta(days=1)).isoformat(),
+            "kwh": 1.0,
+            "controllable": True,
+            "schedules": [],
+        },
+        {
+            "community_id": "CDE",
+            "unit_id": "UDE",
+            "device_id": "lamp",
+            "timestamp": base.isoformat(),
+            "kwh": 0.5,
+            "controllable": True,
+            "schedules": [],
+        },
+    ]
+    for payload in payloads:
+        IngestionService.ingest_event(db, payload, "energy/CDE/UDE/consumption")
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.get("/units/UDE/emissions/daily", params={"community_id": "CDE", "days": 30, "period": "all"}, headers=headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["community_id"] == "CDE"
+        assert body["unit_id"] == "UDE"
+        assert "series" in body
+        assert len(body["series"]) >= 2
+        assert body["total_emission_kg_co2e"] > 0
 
 
 def test_ai_health_and_run_now_success():
@@ -1212,15 +1262,17 @@ def test_unit_device_qty_contract_and_validation():
         assert create_default.status_code in (200, 400)
         if create_default.status_code == 200:
             assert create_default.json()["qty"] == 1
+            assert create_default.json()["is_active"] is True
 
         update_qty = client.put(
             "/units/UQTY/devices/lamp-qty",
             params={"community_id": "CQTY"},
-            json={"qty": 3},
+            json={"qty": 3, "is_active": False},
             headers=headers,
         )
         assert update_qty.status_code == 200
         assert update_qty.json()["qty"] == 3
+        assert update_qty.json()["is_active"] is False
 
         list_devices = client.get(
             "/units/UQTY/devices",
@@ -1232,6 +1284,7 @@ def test_unit_device_qty_contract_and_validation():
         target = next((x for x in items if x["device_id"] == "lamp-qty"), None)
         assert target is not None
         assert target["qty"] == 3
+        assert target["is_active"] is False
 
         invalid_qty = client.post(
             "/units/UQTY/devices",
@@ -1247,8 +1300,82 @@ def test_unit_device_qty_contract_and_validation():
             json={"action": "off"},
             headers=headers,
         )
-        assert control_qty.status_code == 200
-        assert control_qty.json()["status"] in ("sent", "failed")
+        assert control_qty.status_code == 400
+        err_msg = control_qty.json().get("detail") or control_qty.json().get("error", "")
+        assert "inactive" in err_msg.lower()
+
+        reactivate = client.put(
+            "/units/UQTY/devices/lamp-qty",
+            params={"community_id": "CQTY"},
+            json={"is_active": True},
+            headers=headers,
+        )
+        assert reactivate.status_code == 200
+        assert reactivate.json()["is_active"] is True
+
+        control_qty_after_reactivate = client.post(
+            "/units/UQTY/devices/lamp-qty/control",
+            params={"community_id": "CQTY"},
+            json={"action": "off"},
+            headers=headers,
+        )
+        assert control_qty_after_reactivate.status_code == 200
+        assert control_qty_after_reactivate.json()["status"] in ("sent", "failed")
+
+
+def test_unit_device_update_strict_validation_and_schedule_update():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CUPD").first():
+        db.add(Community(community_id="CUPD", name="Community Update"))
+    if not db.query(Unit).filter(Unit.community_id == "CUPD", Unit.unit_id == "UUPD").first():
+        db.add(Unit(community_id="CUPD", unit_id="UUPD", va=2200))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        create = client.post(
+            "/units/UUPD/devices",
+            params={"community_id": "CUPD"},
+            json={"device_id": "ac-upd", "controllable": True, "schedules": [{"start_hour": 8, "end_hour": 10}]},
+            headers=headers,
+        )
+        assert create.status_code in (200, 400)
+
+        bad_typo = client.put(
+            "/units/UUPD/devices/ac-upd",
+            params={"community_id": "CUPD"},
+            json={"schedule": [{"start_hour": 9, "end_hour": 11}]},
+            headers=headers,
+        )
+        assert bad_typo.status_code == 400
+
+        no_op = client.put(
+            "/units/UUPD/devices/ac-upd",
+            params={"community_id": "CUPD"},
+            json={},
+            headers=headers,
+        )
+        assert no_op.status_code == 400
+
+        good_update = client.put(
+            "/units/UUPD/devices/ac-upd",
+            params={"community_id": "CUPD"},
+            json={"schedules": [{"start_hour": 9, "end_hour": 11}]},
+            headers=headers,
+        )
+        assert good_update.status_code == 200
+
+        listed = client.get(
+            "/units/UUPD/devices",
+            params={"community_id": "CUPD", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert listed.status_code == 200
+        item = next((x for x in listed.json()["items"] if x["device_id"] == "ac-upd"), None)
+        assert item is not None
+        assert item["schedules"] == [{"start_hour": 9, "end_hour": 11}]
 
 
 def test_period_month_week_filter_and_comparison():

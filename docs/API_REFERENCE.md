@@ -1004,6 +1004,20 @@ Response `200`:
   "total_kwh": 12.34,
   "estimated_cost": 17819.0,
   "estimated_emission_kg_co2e": 10.489,
+  "device_emissions": [
+    {
+      "device_id": "ac",
+      "device_name": "Air Conditioner",
+      "total_kwh": 6.2,
+      "estimated_emission_kg_co2e": 5.27
+    },
+    {
+      "device_id": "lamp",
+      "device_name": "lamp",
+      "total_kwh": 2.1,
+      "estimated_emission_kg_co2e": 1.79
+    }
+  ],
   "last_timestamp": "2026-05-05T10:00:00",
   "is_fresh": true,
   "period_used": "month",
@@ -1022,6 +1036,39 @@ Response `200`:
     "emission_pct": -6.3,
     "compliance_pct_point_delta": 12.0
   }
+}
+```
+- Catatan: `device_name` diambil dari catalog global device, fallback ke `device_id` jika tidak ditemukan.
+
+#### `GET /units/{unit_id}/emissions/daily?community_id={community_id}`
+- Tujuan: data emisi harian per unit untuk grafik laporan.
+- Auth: Protected (scope check community + unit).
+- Query:
+  - `days` opsional, default `30`, range `1..365`.
+  - `period=all|month|week` opsional, default `all`.
+
+Response `200`:
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "period_used": "month",
+  "period_start": "2026-05-01T00:00:00+00:00",
+  "series": [
+    {
+      "date": "2026-05-01",
+      "total_kwh": 8.2,
+      "estimated_emission_kg_co2e": 6.97
+    },
+    {
+      "date": "2026-05-02",
+      "total_kwh": 7.9,
+      "estimated_emission_kg_co2e": 6.72
+    }
+  ],
+  "total_emission_kg_co2e": 13.69,
+  "last_timestamp": "2026-05-02T21:00:00",
+  "is_fresh": true
 }
 ```
 
@@ -1234,6 +1281,7 @@ Response `200`:
 - Tujuan: list device per unit.
 - Auth: Protected (scope role-based per unit).
 - Catatan: setiap item sekarang punya field `qty` (jumlah perangkat sejenis dalam unit).
+- Catatan: setiap item punya field `is_active` untuk status operasional device di unit.
 - Catatan: `device_name` diambil dari `device_catalog.display_name`; fallback ke `device_id` jika belum terdaftar di catalog.
 
 Response `200`:
@@ -1244,6 +1292,7 @@ Response `200`:
       "device_id": "ac",
       "device_name": "Air Conditioner",
       "qty": 2,
+      "is_active": true,
       "controllable": true,
       "schedules": [
         {
@@ -1266,13 +1315,14 @@ Response `200`:
 - Tujuan: tambah device ke unit.
 - Auth: Protected (admin/coordinator/building_manager/resident pada scope unit yang diizinkan).
 - Body menerima `qty` (opsional, default `1`, minimal `1`).
+- Body menerima `is_active` (opsional, default `true`).
 
 Body:
 ```json
 {
   "device_id": "ac-main",
-  "device_name": "AC Main",
   "qty": 2,
+  "is_active": true,
   "controllable": true,
   "schedules": [
     {
@@ -1286,7 +1336,9 @@ Response `200`:
 ```json
 {
   "device_id": "ac-main",
+  "device_name": "Air Conditioner",
   "qty": 2,
+  "is_active": true,
   "controllable": true,
   "schedules": [
     {
@@ -1299,12 +1351,14 @@ Response `200`:
 #### `PUT /units/{unit_id}/devices/{device_id}?community_id={community_id}`
 - Tujuan: update metadata device unit.
 - Auth: Protected (scope role-based).
-- Dapat update `qty` (`>=1`) selain metadata lain.
+- Dapat update `qty` (`>=1`), `is_active`, selain metadata lain.
+- Gunakan field `schedules` (plural). Field tidak dikenal seperti `schedule` akan ditolak `400`.
 
 Body:
 ```json
 {
   "qty": 3,
+  "is_active": false,
   "controllable": true,
   "schedules": [
     {
@@ -1320,12 +1374,20 @@ Response `200`:
   "device_id": "ac-main",
   "device_name": "AC Main",
   "qty": 3,
+  "is_active": false,
   "controllable": true,
   "schedules": [
     {
       "hours": [18, 19, 20, 21, 22]
     }
   ]
+}
+```
+
+Contoh error `400` (body kosong / no-op):
+```json
+{
+  "detail": "No updatable fields provided"
 }
 ```
 
@@ -1347,6 +1409,7 @@ Response `200`:
 - Tujuan: kontrol device nyata (`action=on|off`) dan publish command ke MQTT.
 - Auth: Protected (scope role-based).
 - Untuk `qty > 1`, command berlaku ke seluruh instance device tersebut.
+- Jika `is_active=false`, request control ditolak (`400 Device is inactive`).
 
 Body:
 ```json

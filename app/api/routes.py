@@ -49,6 +49,7 @@ from app.schemas import (
     DashboardResponse,
     DeadLetterItem,
     DeadLettersListResponse,
+    DeviceEmissionItem,
     DeviceMetadataResponse,
     DeviceCatalogCreateRequest,
     DeviceCatalogListResponse,
@@ -70,6 +71,8 @@ from app.schemas import (
     UnitCreateRequest,
     UnitDeviceCreateRequest,
     UnitDashboardResponse,
+    UnitDailyEmissionPoint,
+    UnitDailyEmissionsResponse,
     UnitDeviceResponse,
     UnitDevicesListResponse,
     UnitDeviceUpdateRequest,
@@ -123,6 +126,12 @@ def _validate_sort_order(sort_order: str) -> None:
 def _validate_sort_by(sort_by: str, allowed: set[str]) -> None:
     if sort_by not in allowed:
         raise HTTPException(status_code=400, detail=f"sort_by must be one of: {', '.join(sorted(allowed))}")
+
+
+def _validate_days(days: int) -> int:
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+    return days
 
 
 def _building_unit_ids(db: Session, building_id: str) -> list[str]:
@@ -281,6 +290,7 @@ def _to_unit_device_response(row: Device, device_name: str) -> UnitDeviceRespons
         device_id=row.device_id,
         device_name=device_name,
         qty=row.qty,
+        is_active=row.is_active,
         controllable=row.controllable,
         schedules=row.schedules,
     )
@@ -1321,6 +1331,31 @@ def unit_summary(
     total_kwh, estimated_cost, last_timestamp = db.execute(
         select(func.coalesce(func.sum(EnergyReading.kwh), 0.0), func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0), func.max(EnergyReading.timestamp)).where(and_(*conditions))
     ).one()
+    device_rows = db.execute(
+        select(
+            EnergyReading.device_id,
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+        )
+        .where(and_(*conditions))
+        .group_by(EnergyReading.device_id)
+        .order_by(EnergyReading.device_id)
+    ).all()
+    device_ids = [str(r.device_id) for r in device_rows]
+    display_name_map: dict[str, str] = {}
+    if device_ids:
+        catalog_rows = db.execute(
+            select(DeviceCatalog.device_key, DeviceCatalog.display_name).where(DeviceCatalog.device_key.in_(device_ids))
+        ).all()
+        display_name_map = {str(r.device_key): str(r.display_name) for r in catalog_rows}
+    device_emissions = [
+        DeviceEmissionItem(
+            device_id=str(r.device_id),
+            device_name=display_name_map.get(str(r.device_id), str(r.device_id)),
+            total_kwh=float(r.total_kwh),
+            estimated_emission_kg_co2e=QueryService.emission(float(r.total_kwh)),
+        )
+        for r in device_rows
+    ]
     comparison = None
     current_compliance = compute_recommendation_compliance(
         db=db,
@@ -1375,12 +1410,87 @@ def unit_summary(
         total_kwh=float(total_kwh),
         estimated_cost=float(estimated_cost),
         estimated_emission_kg_co2e=QueryService.emission(float(total_kwh)),
+        device_emissions=device_emissions,
         last_timestamp=last_timestamp,
         is_fresh=QueryService.freshness(last_timestamp),
         period_used=period_used,
         period_start=period_start,
         comparison=comparison,
         recommendation_compliance=current_compliance.to_schema(window_hours=24),
+    )
+
+
+@router.get("/units/{unit_id}/emissions/daily", response_model=UnitDailyEmissionsResponse)
+def unit_daily_emissions(
+    unit_id: str,
+    community_id: str,
+    days: int = 30,
+    period: str = "all",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    days = _validate_days(days)
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    ensure_community_access(community_id, current_user)
+    _ensure_unit_access(unit_id, current_user)
+    community_exists = db.execute(select(Community.id).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community_exists:
+        raise HTTPException(status_code=404, detail="Not found")
+    unit_exists = db.execute(select(Unit.id).where(and_(Unit.community_id == community_id, Unit.unit_id == unit_id))).scalar_one_or_none()
+    if not unit_exists:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    now = utc_now()
+    days_start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    effective_start = days_start if not period_start else max(days_start, period_start)
+    effective_end = period_end or now
+
+    conditions = [
+        EnergyReading.community_id == community_id,
+        EnergyReading.unit_id == unit_id,
+        EnergyReading.timestamp >= effective_start.replace(tzinfo=None),
+        EnergyReading.timestamp <= effective_end.replace(tzinfo=None),
+    ]
+    if current_user.role != UserRole.ADMIN:
+        conditions.append(EnergyReading.is_simulation.is_(False))
+
+    rows = db.execute(
+        select(
+            func.date(EnergyReading.timestamp).label("day"),
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+        )
+        .where(and_(*conditions))
+        .group_by(func.date(EnergyReading.timestamp))
+        .order_by(func.date(EnergyReading.timestamp))
+    ).all()
+
+    last_timestamp = db.execute(
+        select(func.max(EnergyReading.timestamp)).where(and_(*conditions))
+    ).scalar_one_or_none()
+
+    series = [
+        UnitDailyEmissionPoint(
+            date=str(r.day),
+            total_kwh=float(r.total_kwh),
+            estimated_emission_kg_co2e=QueryService.emission(float(r.total_kwh)),
+        )
+        for r in rows
+    ]
+    total_emission = sum(point.estimated_emission_kg_co2e for point in series)
+
+    return UnitDailyEmissionsResponse(
+        community_id=community_id,
+        unit_id=unit_id,
+        period_used=period_used,
+        period_start=period_start,
+        series=series,
+        total_emission_kg_co2e=float(total_emission),
+        last_timestamp=last_timestamp,
+        is_fresh=QueryService.freshness(last_timestamp),
     )
 
 
@@ -1693,7 +1803,14 @@ def unit_device_create(
     exists = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == payload.device_id))).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="Device already exists on this unit")
-    row = Device(unit_id=unit.id, device_id=payload.device_id, qty=payload.qty, controllable=payload.controllable, schedules=payload.schedules)
+    row = Device(
+        unit_id=unit.id,
+        device_id=payload.device_id,
+        qty=payload.qty,
+        is_active=payload.is_active,
+        controllable=payload.controllable,
+        schedules=payload.schedules,
+    )
     db.add(row)
     db.commit()
     name_map = _resolve_device_names(db, [row.device_id])
@@ -1713,8 +1830,17 @@ def unit_device_update(
     row = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == device_id))).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
+    if (
+        payload.qty is None
+        and payload.is_active is None
+        and payload.controllable is None
+        and payload.schedules is None
+    ):
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
     if payload.qty is not None:
         row.qty = payload.qty
+    if payload.is_active is not None:
+        row.is_active = payload.is_active
     if payload.controllable is not None:
         row.controllable = payload.controllable
     if payload.schedules is not None:
@@ -1754,6 +1880,8 @@ def unit_device_control(
     row = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == device_id))).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
+    if not row.is_active:
+        raise HTTPException(status_code=400, detail="Device is inactive")
     if not row.controllable:
         raise HTTPException(status_code=400, detail="Device is not controllable")
 

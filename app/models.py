@@ -110,6 +110,7 @@ class Device(Base):
     unit_id: Mapped[int] = mapped_column(ForeignKey("units.id"), index=True)
     device_id: Mapped[str] = mapped_column(String(64), index=True)
     qty: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     controllable: Mapped[bool] = mapped_column(Boolean, default=False)
     schedules: Mapped[list] = mapped_column(JSON, nullable=True)
 
