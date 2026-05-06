@@ -13,8 +13,26 @@ Backend sekarang menggunakan JWT bearer untuk endpoint protected.
 
 Public endpoint:
 - `GET /health`
+- `POST /auth/register`
 - `POST /auth/login`
 - `POST /auth/refresh`
+
+Contoh register:
+```json
+{
+  "full_name": "Resident Baru",
+  "email": "resident@example.com",
+  "password": "password12345"
+}
+```
+
+Perilaku register:
+- `user_id` di-generate otomatis oleh backend
+- `role` default `ROLE_RESIDENT`
+- `status` default `PENDING`
+- scope user (`community_id`, `building_id`, `unit_id`) tidak diisi saat register
+- scope user di-assign kemudian oleh admin lewat endpoint edit user
+- user dengan status `PENDING` boleh login; yang diblokir adalah `INACTIVE` dan `DELETED`
 
 Contoh login:
 ```json

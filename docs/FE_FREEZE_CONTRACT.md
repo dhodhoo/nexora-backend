@@ -10,9 +10,17 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
 ## 2) Endpoint Final untuk FE
 
 ### A. Bootstrap User
+1. `POST /auth/register`
 1. `POST /auth/login`
 2. `GET /auth/me`
 3. `GET /me/dashboard`
+
+Catatan bootstrap auth:
+- `POST /auth/register` tidak butuh token.
+- response register mengembalikan `user_id` yang di-generate backend.
+- user hasil register default `ROLE_RESIDENT` dan `PENDING`.
+- scope user tidak dikirim saat register/create.
+- assignment `community_id`, `building_id`, dan `unit_id` dilakukan kemudian lewat edit user.
 
 ### B. Community Dashboard Core
 1. `GET /communities/{community_id}/simulations`
@@ -34,6 +42,10 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
 - Pada `period=month|week`, `comparison` menyertakan `compliance_pct_point_delta` (selisih poin kepatuhan vs periode sebelumnya).
 
 ### C. Management Views
+- Buildings list/detail:
+  - `GET /buildings`
+  - `GET /buildings/{building_id}`
+  - response menyertakan `manager_user_id` (`string | null`)
 - Communities list: `GET /communities`
 - Community members list: `GET /communities/{community_id}/members`
 - Add member: `POST /communities/{community_id}/members`
@@ -114,6 +126,12 @@ Field wajib:
 - `items[].is_read`
 - `items[].read_at`
 - `meta.unread_count`
+
+### `/buildings` dan `/buildings/{building_id}`
+Field wajib:
+- `building_id`
+- `name`
+- `manager_user_id`
 
 ### `/communities/{id}/ai-recommendations`
 Field wajib:
