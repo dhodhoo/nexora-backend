@@ -1672,8 +1672,9 @@ def test_mqtt_ingestion_without_schedules_does_not_clear_manual_schedules():
         item = next((x for x in listed.json()["items"] if x["device_id"] == "ac-mqtt"), None)
         assert item is not None
         assert item["schedules"] == [{"start_hour": 18, "end_hour": 22}]
+        assert item["schedule_source"] == "manual"
 
-        # Ingestion event with explicit schedules should overwrite schedule value.
+        # Ingestion event with explicit schedules must NOT overwrite because source is manual.
         db3 = SessionLocal()
         IngestionService.ingest_event(
             db3,
@@ -1698,7 +1699,60 @@ def test_mqtt_ingestion_without_schedules_does_not_clear_manual_schedules():
         assert listed_after.status_code == 200
         item_after = next((x for x in listed_after.json()["items"] if x["device_id"] == "ac-mqtt"), None)
         assert item_after is not None
-        assert item_after["schedules"] == [{"start_hour": 9, "end_hour": 11}]
+        assert item_after["schedules"] == [{"start_hour": 18, "end_hour": 22}]
+        assert item_after["schedule_source"] == "manual"
+
+
+def test_mqtt_schedule_source_device_can_still_update_from_mqtt():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CMQ2").first():
+        db.add(Community(community_id="CMQ2", name="Community MQTT 2"))
+    if not db.query(Unit).filter(Unit.community_id == "CMQ2", Unit.unit_id == "UMQ2").first():
+        db.add(Unit(community_id="CMQ2", unit_id="UMQ2", va=2200))
+    db.commit()
+
+    # Create device via ingestion path (source=mqtt).
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CMQ2",
+            "unit_id": "UMQ2",
+            "device_id": "ac-live",
+            "timestamp": "2026-05-07T10:00:00+00:00",
+            "kwh": 1.0,
+            "controllable": True,
+            "schedules": [{"start_hour": 7, "end_hour": 9}],
+        },
+        "energy/CMQ2/UMQ2/consumption",
+    )
+    # Another ingestion updates schedules because source remains mqtt.
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CMQ2",
+            "unit_id": "UMQ2",
+            "device_id": "ac-live",
+            "timestamp": "2026-05-07T11:00:00+00:00",
+            "kwh": 1.1,
+            "controllable": True,
+            "schedules": [{"start_hour": 9, "end_hour": 11}],
+        },
+        "energy/CMQ2/UMQ2/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        listed = client.get(
+            "/units/UMQ2/devices",
+            params={"community_id": "CMQ2", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert listed.status_code == 200
+        item = next((x for x in listed.json()["items"] if x["device_id"] == "ac-live"), None)
+        assert item is not None
+        assert item["schedule_source"] == "mqtt"
+        assert item["schedules"] == [{"start_hour": 9, "end_hour": 11}]
 
 
 def test_period_month_week_filter_and_comparison():

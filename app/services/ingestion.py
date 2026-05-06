@@ -50,22 +50,23 @@ class IngestionService:
                 device = Device(
                     unit_id=unit.id,
                     device_id=event.device_id,
+                    schedule_source="mqtt",
                     controllable=event.controllable,
                     schedules=[s.model_dump() for s in event.schedules] if event.schedules else None,
                 )
                 db.add(device)
                 db.flush()
             else:
-                # Treat MQTT schedules as an explicit update only when payload provides a list.
-                # If schedules is missing or null, keep existing manual/API schedule value.
+                # Device schedules set from API (manual) are locked and cannot be overwritten by MQTT.
                 raw_schedules = payload.get("schedules", "__missing__")
                 has_schedules_in_payload = isinstance(raw_schedules, list)
-                new_schedules = [s.model_dump() for s in (event.schedules or [])] if has_schedules_in_payload else device.schedules
-                schedules_changed = has_schedules_in_payload and device.schedules != new_schedules
+                can_update_schedules_from_mqtt = device.schedule_source == "mqtt" and has_schedules_in_payload
+                new_schedules = [s.model_dump() for s in (event.schedules or [])] if can_update_schedules_from_mqtt else device.schedules
+                schedules_changed = can_update_schedules_from_mqtt and device.schedules != new_schedules
                 controllable_changed = device.controllable != event.controllable
                 if controllable_changed or schedules_changed:
                     device.controllable = event.controllable
-                    if has_schedules_in_payload:
+                    if can_update_schedules_from_mqtt:
                         device.schedules = new_schedules
                     db.add(
                         DeviceStateHistory(

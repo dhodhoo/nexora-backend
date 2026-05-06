@@ -96,6 +96,7 @@ Field wajib item device:
 - `device_name` (dari catalog, fallback ke `device_id`)
 - `qty` (integer >= 1)
 - `is_active` (boolean status operasional; jika `false`, control ditolak backend)
+- `schedule_source` (`manual` | `mqtt`) untuk transparansi sumber schedule
 - `controllable`
 - `schedules`
 - Catatan integrasi: saat update device, kirim field `schedules` (plural). Field typo seperti `schedule` akan ditolak `400`.

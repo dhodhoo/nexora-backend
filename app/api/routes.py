@@ -326,6 +326,7 @@ def _to_unit_device_response(row: Device, device_name: str) -> UnitDeviceRespons
         device_name=device_name,
         qty=row.qty,
         is_active=row.is_active,
+        schedule_source=row.schedule_source,
         controllable=row.controllable,
         schedules=row.schedules,
     )
@@ -1921,6 +1922,7 @@ def unit_device_create(
         device_id=payload.device_id,
         qty=payload.qty,
         is_active=payload.is_active,
+        schedule_source="manual" if payload.schedules is not None else "mqtt",
         controllable=payload.controllable,
         schedules=payload.schedules,
     )
@@ -1958,6 +1960,7 @@ def unit_device_update(
         row.controllable = payload.controllable
     if payload.schedules is not None:
         row.schedules = payload.schedules
+        row.schedule_source = "manual"
     db.commit()
     name_map = _resolve_device_names(db, [row.device_id])
     return _to_unit_device_response(row, name_map.get(row.device_id, row.device_id))

@@ -1325,6 +1325,7 @@ Response `200`:
 - Catatan: setiap item sekarang punya field `qty` (jumlah perangkat sejenis dalam unit).
 - Catatan: setiap item punya field `is_active` untuk status operasional device di unit.
 - Catatan: `device_name` diambil dari `device_catalog.display_name`; fallback ke `device_id` jika belum terdaftar di catalog.
+- Catatan: `schedule_source` menunjukkan sumber schedule aktif (`manual` dari API atau `mqtt` dari ingestion).
 
 Response `200`:
 ```json
@@ -1335,6 +1336,7 @@ Response `200`:
       "device_name": "Air Conditioner",
       "qty": 2,
       "is_active": true,
+      "schedule_source": "manual",
       "controllable": true,
       "schedules": [
         {
@@ -1381,6 +1383,7 @@ Response `200`:
   "device_name": "Air Conditioner",
   "qty": 2,
   "is_active": true,
+  "schedule_source": "manual",
   "controllable": true,
   "schedules": [
     {
@@ -1421,6 +1424,7 @@ Response `200`:
   "device_name": "AC Main",
   "qty": 3,
   "is_active": false,
+  "schedule_source": "manual",
   "controllable": true,
   "schedules": [
     {

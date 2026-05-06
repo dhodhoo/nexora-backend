@@ -664,6 +664,7 @@ class UnitDeviceResponse(BaseModel):
     device_name: str
     qty: int
     is_active: bool
+    schedule_source: str = "mqtt"
     controllable: bool
     schedules: Optional[List[Dict[str, Any]]] = None
 
