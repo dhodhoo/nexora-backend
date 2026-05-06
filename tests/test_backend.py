@@ -1130,10 +1130,41 @@ def test_notifications_device_catalog_device_control_and_csv_export():
         n_list = client.get("/notifications", headers=headers)
         assert n_list.status_code == 200
         assert "items" in n_list.json()
+        assert "unread_count" in n_list.json()["meta"]
+        if n_list.json()["items"]:
+            assert "is_read" in n_list.json()["items"][0]
+            assert n_list.json()["items"][0]["is_read"] is False
         if n_list.json()["items"]:
             notif_id = n_list.json()["items"][0]["notification_id"]
             n_detail = client.get(f"/notifications/{notif_id}", headers=headers)
             assert n_detail.status_code == 200
+            assert n_detail.json()["is_read"] is False
+
+            mark_one = client.post(f"/notifications/{notif_id}/mark-read", headers=headers)
+            assert mark_one.status_code == 200
+            assert mark_one.json()["status"] == "ok"
+
+            n_detail_after = client.get(f"/notifications/{notif_id}", headers=headers)
+            assert n_detail_after.status_code == 200
+            assert n_detail_after.json()["is_read"] is True
+            assert n_detail_after.json()["read_at"] is not None
+
+        only_unread = client.get("/notifications", params={"status": "unread"}, headers=headers)
+        assert only_unread.status_code == 200
+        for item in only_unread.json()["items"]:
+            assert item["is_read"] is False
+
+        mark_all = client.post("/notifications/mark-all-read", headers=headers)
+        assert mark_all.status_code == 200
+        assert mark_all.json()["status"] == "ok"
+        assert mark_all.json()["affected_count"] >= 0
+
+        only_unread_after = client.get("/notifications", params={"status": "unread"}, headers=headers)
+        assert only_unread_after.status_code == 200
+        assert only_unread_after.json()["meta"]["unread_count"] == 0
+
+        bad_status = client.get("/notifications", params={"status": "invalid"}, headers=headers)
+        assert bad_status.status_code == 400
 
         c_export = client.get(
             "/communities/C10/reports/export",

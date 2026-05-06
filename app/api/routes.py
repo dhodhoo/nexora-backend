@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal, get_db
-from app.models import AIAnalysisResult, AuditLog, Building, BuildingConfig, BuildingUnit, Community, CommunitySimulationConfig, DeadLetter, Device, DeviceCatalog, DeviceCommand, EnergyReading, Notification, NotificationDelivery, RevokedToken, Unit, User, UserRole, UserStatus
+from app.models import AIAnalysisResult, AuditLog, Building, BuildingConfig, BuildingUnit, Community, CommunitySimulationConfig, DeadLetter, Device, DeviceCatalog, DeviceCommand, EnergyReading, Notification, NotificationDelivery, NotificationRead, RevokedToken, Unit, User, UserRole, UserStatus
 from app.schemas import (
     AddCommunityMemberRequest,
     AIRecommendationsResponse,
@@ -85,6 +85,8 @@ from app.schemas import (
     NotificationResponse,
     NotificationDeliveryItem,
     NotificationsListResponse,
+    NotificationMarkReadResponse,
+    NotificationMarkAllReadResponse,
 )
 from app.services.ai_integration import ai_orchestrator
 from app.services.ai_recommendations import get_latest_ai_result, parse_recommendations
@@ -195,12 +197,53 @@ def _validate_user_scope(
         raise HTTPException(status_code=400, detail="unit_id is required for this role")
 
 
-def _notification_with_deliveries(db: Session, row: Notification) -> NotificationResponse:
+def _apply_notification_scope(stmt, current_user: User):
+    if current_user.role == UserRole.COORDINATOR:
+        return stmt.where(Notification.community_id == current_user.community_id)
+    if current_user.role == UserRole.BUILDING_MANAGER:
+        return stmt.where(Notification.building_id == current_user.building_id)
+    if current_user.role == UserRole.RESIDENT:
+        return stmt.where(Notification.community_id == current_user.community_id)
+    return stmt
+
+
+def _can_access_notification(row: Notification, current_user: User) -> bool:
+    if current_user.role == UserRole.ADMIN:
+        return True
+    if current_user.role == UserRole.COORDINATOR:
+        return row.community_id == current_user.community_id
+    if current_user.role == UserRole.BUILDING_MANAGER:
+        return row.building_id == current_user.building_id
+    if current_user.role == UserRole.RESIDENT:
+        return row.community_id == current_user.community_id
+    return False
+
+
+def _notification_with_deliveries(
+    db: Session,
+    row: Notification,
+    current_user: User,
+    read_lookup: dict[str, datetime] | None = None,
+) -> NotificationResponse:
     deliveries = db.execute(
         select(NotificationDelivery)
         .where(NotificationDelivery.notification_id == row.notification_id)
         .order_by(NotificationDelivery.created_at.asc())
     ).scalars().all()
+    read_at = None
+    if read_lookup is not None:
+        read_at = read_lookup.get(row.notification_id)
+    else:
+        read_row = db.execute(
+            select(NotificationRead.read_at).where(
+                and_(
+                    NotificationRead.notification_id == row.notification_id,
+                    NotificationRead.user_id == current_user.user_id,
+                )
+            )
+        ).first()
+        read_at = read_row[0] if read_row else None
+
     return NotificationResponse(
         notification_id=row.notification_id,
         scope=row.scope,
@@ -209,6 +252,8 @@ def _notification_with_deliveries(db: Session, row: Notification) -> Notificatio
         message=row.message,
         created_by_user_id=row.created_by_user_id,
         created_at=row.created_at,
+        is_read=read_at is not None,
+        read_at=read_at,
         deliveries=[
             NotificationDeliveryItem(
                 target_type=d.target_type,
@@ -219,6 +264,23 @@ def _notification_with_deliveries(db: Session, row: Notification) -> Notificatio
             )
             for d in deliveries
         ],
+    )
+
+
+def _resolve_device_names(db: Session, device_ids: list[str]) -> dict[str, str]:
+    if not device_ids:
+        return {}
+    rows = db.execute(select(DeviceCatalog).where(DeviceCatalog.device_key.in_(device_ids))).scalars().all()
+    return {row.device_key: row.display_name for row in rows}
+
+
+def _to_unit_device_response(row: Device, device_name: str) -> UnitDeviceResponse:
+    return UnitDeviceResponse(
+        device_id=row.device_id,
+        device_name=device_name,
+        qty=row.qty,
+        controllable=row.controllable,
+        schedules=row.schedules,
     )
 
 
@@ -1477,7 +1539,9 @@ def unit_devices(
     unit = _ensure_unit_operation_access(db, current_user, community_id, unit_id)
     total = int(db.execute(select(func.count(Device.id)).where(Device.unit_id == unit.id)).scalar_one())
     rows = db.execute(select(Device).where(Device.unit_id == unit.id).order_by(Device.device_id).offset(offset).limit(limit)).scalars().all()
-    items = [UnitDeviceResponse(device_id=r.device_id, qty=r.qty, controllable=r.controllable, schedules=r.schedules) for r in rows]
+    device_ids = [r.device_id for r in rows]
+    name_map = _resolve_device_names(db, device_ids)
+    items = [_to_unit_device_response(r, name_map.get(r.device_id, r.device_id)) for r in rows]
     return {"items": items, "meta": _meta(total, offset, limit)}
 
 
@@ -1496,7 +1560,8 @@ def unit_device_create(
     row = Device(unit_id=unit.id, device_id=payload.device_id, qty=payload.qty, controllable=payload.controllable, schedules=payload.schedules)
     db.add(row)
     db.commit()
-    return UnitDeviceResponse(device_id=row.device_id, qty=row.qty, controllable=row.controllable, schedules=row.schedules)
+    name_map = _resolve_device_names(db, [row.device_id])
+    return _to_unit_device_response(row, name_map.get(row.device_id, row.device_id))
 
 
 @router.put("/units/{unit_id}/devices/{device_id}", response_model=UnitDeviceResponse)
@@ -1519,7 +1584,8 @@ def unit_device_update(
     if payload.schedules is not None:
         row.schedules = payload.schedules
     db.commit()
-    return UnitDeviceResponse(device_id=row.device_id, qty=row.qty, controllable=row.controllable, schedules=row.schedules)
+    name_map = _resolve_device_names(db, [row.device_id])
+    return _to_unit_device_response(row, name_map.get(row.device_id, row.device_id))
 
 
 @router.delete("/units/{unit_id}/devices/{device_id}")
@@ -1642,26 +1708,56 @@ def send_community_broadcast(
 def list_notifications(
     offset: int = 0,
     limit: int = 20,
+    status: str = "all",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     limit = _validate_pagination(offset, limit)
-    stmt = select(Notification)
-    count_stmt = select(func.count(Notification.id))
-    if current_user.role == UserRole.COORDINATOR:
-        stmt = stmt.where(Notification.community_id == current_user.community_id)
-        count_stmt = count_stmt.where(Notification.community_id == current_user.community_id)
-    elif current_user.role == UserRole.BUILDING_MANAGER:
-        stmt = stmt.where(Notification.building_id == current_user.building_id)
-        count_stmt = count_stmt.where(Notification.building_id == current_user.building_id)
-    elif current_user.role == UserRole.RESIDENT:
-        stmt = stmt.where(Notification.community_id == current_user.community_id)
-        count_stmt = count_stmt.where(Notification.community_id == current_user.community_id)
+    status_value = (status or "all").lower()
+    if status_value not in {"all", "read", "unread"}:
+        raise HTTPException(status_code=400, detail="status must be one of: all, read, unread")
 
-    total = int(db.execute(count_stmt).scalar_one())
-    rows = db.execute(stmt.order_by(desc(Notification.created_at)).offset(offset).limit(limit)).scalars().all()
-    items = [_notification_with_deliveries(db, row) for row in rows]
-    return {"items": items, "meta": _meta(total, offset, limit)}
+    base_stmt = _apply_notification_scope(select(Notification), current_user)
+    base_count_stmt = _apply_notification_scope(select(func.count(Notification.id)), current_user)
+
+    read_exists = (
+        select(NotificationRead.id)
+        .where(
+            and_(
+                NotificationRead.notification_id == Notification.notification_id,
+                NotificationRead.user_id == current_user.user_id,
+            )
+        )
+        .exists()
+    )
+    if status_value == "read":
+        base_stmt = base_stmt.where(read_exists)
+        base_count_stmt = base_count_stmt.where(read_exists)
+    elif status_value == "unread":
+        base_stmt = base_stmt.where(~read_exists)
+        base_count_stmt = base_count_stmt.where(~read_exists)
+
+    total = int(db.execute(base_count_stmt).scalar_one())
+    rows = db.execute(base_stmt.order_by(desc(Notification.created_at)).offset(offset).limit(limit)).scalars().all()
+    notif_ids = [r.notification_id for r in rows]
+    read_rows = []
+    if notif_ids:
+        read_rows = db.execute(
+            select(NotificationRead.notification_id, NotificationRead.read_at).where(
+                and_(
+                    NotificationRead.user_id == current_user.user_id,
+                    NotificationRead.notification_id.in_(notif_ids),
+                )
+            )
+        ).all()
+    read_lookup = {r.notification_id: r.read_at for r in read_rows}
+    items = [_notification_with_deliveries(db, row, current_user, read_lookup=read_lookup) for row in rows]
+
+    unread_count_stmt = _apply_notification_scope(select(func.count(Notification.id)), current_user).where(~read_exists)
+    unread_count = int(db.execute(unread_count_stmt).scalar_one())
+    meta = _meta(total, offset, limit)
+    meta["unread_count"] = unread_count
+    return {"items": items, "meta": meta}
 
 
 @router.get("/notifications/{notification_id}", response_model=NotificationResponse)
@@ -1673,13 +1769,66 @@ def get_notification(
     row = db.execute(select(Notification).where(Notification.notification_id == notification_id)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    if current_user.role == UserRole.COORDINATOR and row.community_id != current_user.community_id:
+    if not _can_access_notification(row, current_user):
         raise HTTPException(status_code=403, detail="Forbidden")
-    if current_user.role == UserRole.BUILDING_MANAGER and row.building_id != current_user.building_id:
+    return _notification_with_deliveries(db, row, current_user)
+
+
+@router.post("/notifications/{notification_id}/mark-read", response_model=NotificationMarkReadResponse)
+def mark_notification_read(
+    notification_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    row = db.execute(select(Notification).where(Notification.notification_id == notification_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not _can_access_notification(row, current_user):
         raise HTTPException(status_code=403, detail="Forbidden")
-    if current_user.role == UserRole.RESIDENT and row.community_id != current_user.community_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return _notification_with_deliveries(db, row)
+
+    existing = db.execute(
+        select(NotificationRead).where(
+            and_(
+                NotificationRead.notification_id == notification_id,
+                NotificationRead.user_id == current_user.user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return {"status": "ok", "notification_id": notification_id, "read_at": existing.read_at}
+
+    read_at = utc_now()
+    db.add(NotificationRead(notification_id=notification_id, user_id=current_user.user_id, read_at=read_at))
+    db.commit()
+    return {"status": "ok", "notification_id": notification_id, "read_at": read_at}
+
+
+@router.post("/notifications/mark-all-read", response_model=NotificationMarkAllReadResponse)
+def mark_all_notifications_read(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    visible_rows = db.execute(_apply_notification_scope(select(Notification.notification_id), current_user)).all()
+    notification_ids = [r.notification_id for r in visible_rows]
+    if not notification_ids:
+        return {"status": "ok", "affected_count": 0}
+
+    existing_rows = db.execute(
+        select(NotificationRead.notification_id).where(
+            and_(
+                NotificationRead.user_id == current_user.user_id,
+                NotificationRead.notification_id.in_(notification_ids),
+            )
+        )
+    ).all()
+    existing_ids = {r.notification_id for r in existing_rows}
+    to_insert = [nid for nid in notification_ids if nid not in existing_ids]
+    now = utc_now()
+    for nid in to_insert:
+        db.add(NotificationRead(notification_id=nid, user_id=current_user.user_id, read_at=now))
+    if to_insert:
+        db.commit()
+    return {"status": "ok", "affected_count": len(to_insert)}
 
 
 @router.get("/ai/health")

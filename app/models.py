@@ -215,6 +215,17 @@ class NotificationDelivery(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
 
+class NotificationRead(Base):
+    __tablename__ = "notification_reads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    notification_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    read_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+    __table_args__ = (UniqueConstraint("notification_id", "user_id", name="uq_notification_read_user"),)
+
+
 class DeviceCommand(Base):
     __tablename__ = "device_commands"
 

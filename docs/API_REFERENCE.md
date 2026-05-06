@@ -1157,6 +1157,7 @@ Response `200`:
 - Tujuan: list device per unit.
 - Auth: Protected (scope role-based per unit).
 - Catatan: setiap item sekarang punya field `qty` (jumlah perangkat sejenis dalam unit).
+- Catatan: `device_name` diambil dari `device_catalog.display_name`; fallback ke `device_id` jika belum terdaftar di catalog.
 
 Response `200`:
 ```json
@@ -1164,6 +1165,7 @@ Response `200`:
   "items": [
     {
       "device_id": "ac",
+      "device_name": "Air Conditioner",
       "qty": 2,
       "controllable": true,
       "schedules": [
@@ -1192,6 +1194,7 @@ Body:
 ```json
 {
   "device_id": "ac-main",
+  "device_name": "AC Main",
   "qty": 2,
   "controllable": true,
   "schedules": [
@@ -1238,6 +1241,7 @@ Response `200`:
 ```json
 {
   "device_id": "ac-main",
+  "device_name": "AC Main",
   "qty": 3,
   "controllable": true,
   "schedules": [
@@ -1342,10 +1346,89 @@ Response `200`:
 #### `GET /notifications`
 - Tujuan: list notifikasi yang tersimpan (dengan delivery status).
 - Auth: Protected.
+- Query opsional:
+  - `status=all|read|unread` (default `all`)
+
+Response `200`:
+```json
+{
+  "items": [
+    {
+      "notification_id": "a61ec220-c0cb-48e4-a48f-ad4eb14d3c0a",
+      "scope": "community",
+      "community_id": "C01",
+      "building_id": null,
+      "message": "Mohon kurangi beban pada jam puncak malam ini.",
+      "created_by_user_id": "admin-001",
+      "created_at": "2026-05-06T10:15:00Z",
+      "is_read": false,
+      "read_at": null,
+      "deliveries": [
+        {
+          "target_type": "scope",
+          "target_id": "C01",
+          "status": "queued",
+          "delivered_at": null,
+          "error": null
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "total": 1,
+    "offset": 0,
+    "limit": 20,
+    "has_next": false,
+    "unread_count": 1
+  }
+}
+```
 
 #### `GET /notifications/{notification_id}`
 - Tujuan: detail notifikasi (termasuk delivery).
 - Auth: Protected.
+
+Response `200`:
+```json
+{
+  "notification_id": "a61ec220-c0cb-48e4-a48f-ad4eb14d3c0a",
+  "scope": "community",
+  "community_id": "C01",
+  "building_id": null,
+  "message": "Mohon kurangi beban pada jam puncak malam ini.",
+  "created_by_user_id": "admin-001",
+  "created_at": "2026-05-06T10:15:00Z",
+  "is_read": true,
+  "read_at": "2026-05-06T10:17:00Z",
+  "deliveries": []
+}
+```
+
+#### `POST /notifications/{notification_id}/mark-read`
+- Tujuan: menandai satu notifikasi sebagai sudah dibaca oleh user saat ini.
+- Auth: Protected.
+- Idempotent: jika sudah dibaca, tetap `200`.
+
+Response `200`:
+```json
+{
+  "status": "ok",
+  "notification_id": "a61ec220-c0cb-48e4-a48f-ad4eb14d3c0a",
+  "read_at": "2026-05-06T10:17:00Z"
+}
+```
+
+#### `POST /notifications/mark-all-read`
+- Tujuan: menandai semua notifikasi visible user saat ini sebagai sudah dibaca.
+- Auth: Protected.
+
+Response `200`:
+```json
+{
+  "status": "ok",
+  "affected_count": 12
+}
+```
 
 ---
 

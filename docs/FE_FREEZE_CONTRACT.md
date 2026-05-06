@@ -41,8 +41,10 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
 - Notifications:
   - `POST /communities/{community_id}/notifications`
   - `POST /buildings/{building_id}/notifications`
-  - `GET /notifications`
+  - `GET /notifications?status=all|read|unread`
   - `GET /notifications/{notification_id}`
+  - `POST /notifications/{notification_id}/mark-read`
+  - `POST /notifications/mark-all-read`
 - CSV export:
   - `GET /communities/{community_id}/reports/export?format=csv`
   - `GET /buildings/{building_id}/reports/export?format=csv`
@@ -69,9 +71,18 @@ Field wajib:
 ### Unit Device Card (per unit)
 Field wajib item device:
 - `device_id`
+- `device_name` (dari catalog, fallback ke `device_id`)
 - `qty` (integer >= 1)
 - `controllable`
 - `schedules`
+
+### Notifications List
+Field wajib:
+- `items[].notification_id`
+- `items[].message`
+- `items[].is_read`
+- `items[].read_at`
+- `meta.unread_count`
 
 ### `/communities/{id}/ai-recommendations`
 Field wajib:

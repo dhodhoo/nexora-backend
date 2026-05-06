@@ -66,6 +66,7 @@ class ListMetaResponse(BaseModel):
     offset: int
     limit: int
     has_next: bool
+    unread_count: Optional[int] = None
 
 
 class CommunitiesListResponse(BaseModel):
@@ -519,12 +520,25 @@ class NotificationResponse(BaseModel):
     message: str
     created_by_user_id: Optional[str] = None
     created_at: datetime
+    is_read: bool = False
+    read_at: Optional[datetime] = None
     deliveries: List[NotificationDeliveryItem] = Field(default_factory=list)
 
 
 class NotificationsListResponse(BaseModel):
     items: List[NotificationResponse]
     meta: ListMetaResponse
+
+
+class NotificationMarkReadResponse(BaseModel):
+    status: str
+    notification_id: str
+    read_at: datetime
+
+
+class NotificationMarkAllReadResponse(BaseModel):
+    status: str
+    affected_count: int
 
 
 class DeviceCatalogCreateRequest(BaseModel):
@@ -571,6 +585,7 @@ class UnitDeviceUpdateRequest(BaseModel):
 
 class UnitDeviceResponse(BaseModel):
     device_id: str
+    device_name: str
     qty: int
     controllable: bool
     schedules: Optional[List[Dict[str, Any]]] = None
