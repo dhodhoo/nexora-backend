@@ -110,8 +110,14 @@ class MQTTConsumer:
 
     def start(self):
         self._running = True
-        self.client.connect(settings.mqtt_host, settings.mqtt_port, 60)
-        self.client.loop_start()
+        try:
+            self.client.connect(settings.mqtt_host, settings.mqtt_port, 60)
+            self.client.loop_start()
+        except Exception as exc:
+            self._running = False
+            self._connected = False
+            self._last_error = str(exc)
+            print(f"[MQTT][START_FAILED] {exc}")
 
     def stop(self):
         self._running = False

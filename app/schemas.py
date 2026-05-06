@@ -20,6 +20,13 @@ class ConsumptionEvent(BaseModel):
     schedules: Optional[List[DeviceSchedule]] = None
 
 
+class RecommendationCompliance(BaseModel):
+    total_recommendations: int = 0
+    followed_recommendations: int = 0
+    compliance_pct: Optional[float] = None
+    window_hours: int = 24
+
+
 class UnitSummaryResponse(BaseModel):
     community_id: str
     unit_id: str
@@ -28,6 +35,10 @@ class UnitSummaryResponse(BaseModel):
     estimated_emission_kg_co2e: float
     last_timestamp: Optional[datetime]
     is_fresh: bool
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    comparison: Optional["PeriodComparison"] = None
+    recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
 
 
 class PeakRiskResponse(BaseModel):
@@ -35,6 +46,17 @@ class PeakRiskResponse(BaseModel):
     peak_hour: Optional[str]
     peak_kwh: float
     risk_level: str
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+
+
+class PeriodComparison(BaseModel):
+    previous_period_start: Optional[datetime] = None
+    previous_period_end: Optional[datetime] = None
+    consumption_pct: Optional[float] = None
+    cost_pct: Optional[float] = None
+    emission_pct: Optional[float] = None
+    compliance_pct_point_delta: Optional[float] = None
 
 
 class DeviceMetadataResponse(BaseModel):
@@ -103,6 +125,10 @@ class CommunityUnitSummaryItem(BaseModel):
     estimated_emission_kg_co2e: float
     last_timestamp: Optional[datetime]
     is_fresh: bool
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    comparison: Optional[PeriodComparison] = None
+    recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
 
 
 class AIStatusResponse(BaseModel):
@@ -125,6 +151,10 @@ class DashboardCommunitySummary(BaseModel):
     estimated_emission_kg_co2e: float
     last_timestamp: Optional[datetime]
     is_fresh: bool
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    comparison: Optional[PeriodComparison] = None
+    recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
 
 
 class DashboardResponse(BaseModel):
@@ -135,6 +165,10 @@ class DashboardResponse(BaseModel):
     ai_status: AIStatusResponse
     unit_ai_recommendations: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
     include_simulation_used: bool = False
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    comparison: Optional[PeriodComparison] = None
+    recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
     generated_at: datetime
 
 
@@ -147,6 +181,10 @@ class UnitDashboardSummary(BaseModel):
     estimated_emission_kg_co2e: float
     last_timestamp: Optional[datetime]
     is_fresh: bool
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    comparison: Optional[PeriodComparison] = None
+    recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
 
 
 class UnitDashboardResponse(BaseModel):
@@ -156,6 +194,10 @@ class UnitDashboardResponse(BaseModel):
     load_curve: List[Dict[str, Any]]
     peak_risk: PeakRiskResponse
     ai_recommendations: List[Dict[str, Any]] = Field(default_factory=list)
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    comparison: Optional[PeriodComparison] = None
+    recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
     generated_at: datetime
 
 

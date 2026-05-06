@@ -22,6 +22,14 @@ Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada
 4. `WS /ws/communities/{community_id}/dashboard`
 5. `GET /communities/{community_id}/units/{unit_id}/dashboard`
 6. `WS /ws/communities/{community_id}/units/{unit_id}/dashboard`
+- Untuk analytics periodik, endpoint dashboard/summary mendukung query `period=all|month|week` (default `all`).
+- Untuk `period=month|week`, response juga menyertakan blok `comparison` (persen konsumsi/tagihan/emisi vs periode sebelumnya). Jika periode sebelumnya nol, nilai persen akan `null`.
+- Semua endpoint analytics utama juga menyertakan blok `recommendation_compliance`:
+  - `total_recommendations`
+  - `followed_recommendations`
+  - `compliance_pct`
+  - `window_hours` (24)
+- Pada `period=month|week`, `comparison` menyertakan `compliance_pct_point_delta` (selisih poin kepatuhan vs periode sebelumnya).
 
 ### C. Management Views
 - Communities list: `GET /communities`
@@ -144,6 +152,8 @@ Field wajib:
 2. Load `/auth/me` dan `/me/dashboard`.
 3. Ambil `/communities/{id}/simulations`.
 4. Ambil `/communities/{id}/dashboard` (dengan `include_simulation` sesuai toggle FE).
+   - Untuk tampilan bulanan FE, pakai `period=month`.
+   - Untuk tampilan mingguan FE, pakai `period=week`.
 5. Ambil `/communities/{id}/ai-recommendations`.
 6. Connect WebSocket dashboard untuk realtime update.
 7. Jika WS disconnect, fallback ke polling dashboard.

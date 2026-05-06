@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 
@@ -23,10 +23,17 @@ def _ensure_test_database():
     )
     with psycopg.connect(admin_dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (TEST_DB_NAME,))
-            exists = cur.fetchone()
-            if not exists:
-                cur.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
+            # Force-clean test DB for deterministic schema/enum lifecycle.
+            cur.execute(
+                """
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname = %s AND pid <> pg_backend_pid()
+                """,
+                (TEST_DB_NAME,),
+            )
+            cur.execute(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}"')
+            cur.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
 
 
 _ensure_test_database()
@@ -38,13 +45,14 @@ from fastapi.testclient import TestClient
 
 from app.database import Base, SessionLocal, engine
 from app.main import app
-from app.models import AIAnalysisResult, Building, BuildingUnit, Community, Unit, User
+from app.models import AIAnalysisResult, Building, BuildingUnit, Community, DeviceCommand, Unit, User
 from app.services.ai_integration import ai_orchestrator
 from app.services.ingestion import IngestionService
+from app.utils.time import utc_now
 
 
 def setup_module(module):
-    Base.metadata.drop_all(bind=engine)
+    # DB was recreated in _ensure_test_database.
     Base.metadata.create_all(bind=engine)
 
 
@@ -1241,3 +1249,153 @@ def test_unit_device_qty_contract_and_validation():
         )
         assert control_qty.status_code == 200
         assert control_qty.json()["status"] in ("sent", "failed")
+
+
+def test_period_month_week_filter_and_comparison():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CPER").first():
+        db.add(Community(community_id="CPER", name="Community Period"))
+    if not db.query(Unit).filter(Unit.community_id == "CPER", Unit.unit_id == "UPER").first():
+        db.add(Unit(community_id="CPER", unit_id="UPER", va=2200))
+    db.commit()
+
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CPER",
+            "unit_id": "UPER",
+            "device_id": "ac",
+            "timestamp": "2026-04-20T10:00:00+00:00",
+            "kwh": 5.0,
+            "controllable": True,
+        },
+        "energy/CPER/UPER/consumption",
+    )
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CPER",
+            "unit_id": "UPER",
+            "device_id": "lamp",
+            "timestamp": "2026-05-04T10:00:00+00:00",
+            "kwh": 2.0,
+            "controllable": True,
+        },
+        "energy/CPER/UPER/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        all_summary = client.get("/units/UPER/summary", params={"community_id": "CPER", "period": "all"}, headers=headers)
+        month_summary = client.get("/units/UPER/summary", params={"community_id": "CPER", "period": "month"}, headers=headers)
+        week_summary = client.get("/units/UPER/summary", params={"community_id": "CPER", "period": "week"}, headers=headers)
+        assert all_summary.status_code == 200
+        assert month_summary.status_code == 200
+        assert week_summary.status_code == 200
+        assert all_summary.json()["period_used"] == "all"
+        assert month_summary.json()["period_used"] == "month"
+        assert week_summary.json()["period_used"] == "week"
+        assert month_summary.json()["period_start"] is not None
+        assert week_summary.json()["period_start"] is not None
+        assert all_summary.json()["total_kwh"] > month_summary.json()["total_kwh"]
+        assert week_summary.json()["comparison"] is not None
+        assert "consumption_pct" in week_summary.json()["comparison"]
+
+        units_month = client.get("/communities/CPER/units-summary", params={"period": "month"}, headers=headers)
+        units_week = client.get("/communities/CPER/units-summary", params={"period": "week"}, headers=headers)
+        assert units_month.status_code == 200
+        assert units_week.status_code == 200
+        if units_month.json():
+            assert units_month.json()[0]["period_used"] == "month"
+            assert units_month.json()[0]["period_start"] is not None
+            assert "comparison" in units_month.json()[0]
+        if units_week.json():
+            assert units_week.json()[0]["period_used"] == "week"
+            assert "comparison" in units_week.json()[0]
+
+        dash_month = client.get("/communities/CPER/dashboard", params={"period": "month"}, headers=headers)
+        dash_week = client.get("/communities/CPER/dashboard", params={"period": "week"}, headers=headers)
+        assert dash_month.status_code == 200
+        assert dash_week.status_code == 200
+        assert dash_month.json()["period_used"] == "month"
+        assert dash_month.json()["period_start"] is not None
+        assert dash_month.json()["community"]["period_used"] == "month"
+        assert dash_month.json()["comparison"] is not None
+        assert dash_month.json()["community"]["comparison"] is not None
+        assert dash_week.json()["period_used"] == "week"
+        assert dash_week.json()["comparison"] is not None
+
+        bad_period = client.get("/communities/CPER/units-summary", params={"period": "weekly"}, headers=headers)
+        assert bad_period.status_code == 400
+
+
+def test_recommendation_compliance_command_matched():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CCMP").first():
+        db.add(Community(community_id="CCMP", name="Community Compliance"))
+    if not db.query(Unit).filter(Unit.community_id == "CCMP", Unit.unit_id == "UCMP").first():
+        db.add(Unit(community_id="CCMP", unit_id="UCMP", va=2200))
+    db.commit()
+
+    analyzed_at = utc_now().replace(tzinfo=None) - timedelta(hours=2)
+    db.add(
+        AIAnalysisResult(
+            community_id="CCMP",
+            analyzed_at=analyzed_at,
+            status="success",
+            stale=False,
+            source="manual",
+            payload={},
+            result={
+                "result": {
+                    "recommendations": [
+                        {
+                            "unit_id": "UCMP",
+                            "device": "ac-main",
+                            "action": "turn_off",
+                            "saving": 1000,
+                            "co2_reduction": 0.1,
+                            "estimated_reduction_kwh": 0.2,
+                            "reasons": ["outside schedule"],
+                        }
+                    ]
+                }
+            },
+            error="",
+        )
+    )
+    db.add(
+        DeviceCommand(
+            command_id="cmd-cmpr-1",
+            community_id="CCMP",
+            unit_id="UCMP",
+            device_id="ac-main",
+            action="off",
+            topic="energy/CCMP/UCMP/control/ac-main",
+            status="sent",
+            error=None,
+            created_by_user_id="admin-1",
+            created_at=analyzed_at + timedelta(hours=1),
+        )
+    )
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        u = client.get("/units/UCMP/summary", params={"community_id": "CCMP", "period": "week"}, headers=headers)
+        assert u.status_code == 200
+        ub = u.json()["recommendation_compliance"]
+        assert ub["total_recommendations"] >= 1
+        assert ub["followed_recommendations"] >= 1
+        assert ub["compliance_pct"] is not None
+
+        d = client.get("/communities/CCMP/dashboard", params={"period": "week"}, headers=headers)
+        assert d.status_code == 200
+        dbody = d.json()
+        assert "recommendation_compliance" in dbody
+        assert "recommendation_compliance" in dbody["community"]
+        assert dbody["comparison"] is not None
+        assert "compliance_pct_point_delta" in dbody["comparison"]

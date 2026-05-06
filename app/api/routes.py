@@ -63,6 +63,7 @@ from app.schemas import (
     MeDashboardScope,
     MeDashboardUser,
     PeakRiskResponse,
+    PeriodComparison,
     RefreshRequest,
     ResetPasswordRequest,
     TokenResponse,
@@ -91,11 +92,12 @@ from app.schemas import (
 from app.services.ai_integration import ai_orchestrator
 from app.services.ai_recommendations import get_latest_ai_result, parse_recommendations
 from app.services.auth import AuthService, ensure_building_access, ensure_community_access, get_current_user, require_roles
-from app.services.dashboard import build_dashboard_snapshot, build_load_curve, build_peak_risk, build_units_summary, build_unit_dashboard_snapshot
+from app.services.dashboard import build_dashboard_snapshot, build_load_curve, build_peak_risk, build_units_summary, build_unit_dashboard_snapshot, resolve_period
 from app.services.device_control import publish_device_command
 from app.services.ingestion import QueryService
 from app.services.rate_limit import broadcast_rate_limiter
 from app.services.realtime_ws import dashboard_ws_manager
+from app.services.recommendation_compliance import compute_recommendation_compliance
 from app.utils.time import assume_utc, utc_now
 
 router = APIRouter()
@@ -1297,39 +1299,137 @@ def bulk_delete_units(community_id: str, payload: BulkDeleteUnitsRequest, db: Se
 
 
 @router.get("/units/{unit_id}/summary", response_model=UnitSummaryResponse)
-def unit_summary(unit_id: str, community_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def unit_summary(
+    unit_id: str,
+    community_id: str,
+    period: str = "all",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     ensure_community_access(community_id, current_user)
     conditions = [EnergyReading.unit_id == unit_id, EnergyReading.community_id == community_id]
+    if period_start:
+        conditions.append(EnergyReading.timestamp >= period_start.replace(tzinfo=None))
+    if period_end:
+        conditions.append(EnergyReading.timestamp <= period_end.replace(tzinfo=None))
     if current_user.role != UserRole.ADMIN:
         conditions.append(EnergyReading.is_simulation.is_(False))
     total_kwh, estimated_cost, last_timestamp = db.execute(
         select(func.coalesce(func.sum(EnergyReading.kwh), 0.0), func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0), func.max(EnergyReading.timestamp)).where(and_(*conditions))
     ).one()
-    return UnitSummaryResponse(community_id=community_id, unit_id=unit_id, total_kwh=float(total_kwh), estimated_cost=float(estimated_cost), estimated_emission_kg_co2e=QueryService.emission(float(total_kwh)), last_timestamp=last_timestamp, is_fresh=QueryService.freshness(last_timestamp))
+    comparison = None
+    current_compliance = compute_recommendation_compliance(
+        db=db,
+        community_id=community_id,
+        period_start=period_start,
+        period_end=period_end,
+        unit_id=unit_id,
+        window_hours=24,
+    )
+    if period_used in {"week", "month"} and period_start and period_end:
+        delta = period_end - period_start
+        prev_start = period_start - delta
+        prev_end = period_start
+        prev_conditions = [EnergyReading.unit_id == unit_id, EnergyReading.community_id == community_id]
+        prev_conditions.append(EnergyReading.timestamp >= prev_start.replace(tzinfo=None))
+        prev_conditions.append(EnergyReading.timestamp < prev_end.replace(tzinfo=None))
+        if current_user.role != UserRole.ADMIN:
+            prev_conditions.append(EnergyReading.is_simulation.is_(False))
+        prev_kwh, prev_cost = db.execute(
+            select(
+                func.coalesce(func.sum(EnergyReading.kwh), 0.0),
+                func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0),
+            ).where(and_(*prev_conditions))
+        ).one()
+        prev_kwh_f = float(prev_kwh)
+        prev_cost_f = float(prev_cost)
+        current_kwh_f = float(total_kwh)
+        current_cost_f = float(estimated_cost)
+        current_emission = QueryService.emission(current_kwh_f)
+        prev_emission = QueryService.emission(prev_kwh_f)
+        comparison = PeriodComparison(
+            previous_period_start=prev_start,
+            previous_period_end=prev_end,
+            consumption_pct=((current_kwh_f - prev_kwh_f) / prev_kwh_f * 100.0) if prev_kwh_f != 0 else None,
+            cost_pct=((current_cost_f - prev_cost_f) / prev_cost_f * 100.0) if prev_cost_f != 0 else None,
+            emission_pct=((current_emission - prev_emission) / prev_emission * 100.0) if prev_emission != 0 else None,
+            compliance_pct_point_delta=None,
+        )
+        previous_compliance = compute_recommendation_compliance(
+            db=db,
+            community_id=community_id,
+            period_start=prev_start,
+            period_end=prev_end,
+            unit_id=unit_id,
+            window_hours=24,
+        )
+        if current_compliance.compliance_pct is not None and previous_compliance.compliance_pct is not None:
+            comparison.compliance_pct_point_delta = current_compliance.compliance_pct - previous_compliance.compliance_pct
+    return UnitSummaryResponse(
+        community_id=community_id,
+        unit_id=unit_id,
+        total_kwh=float(total_kwh),
+        estimated_cost=float(estimated_cost),
+        estimated_emission_kg_co2e=QueryService.emission(float(total_kwh)),
+        last_timestamp=last_timestamp,
+        is_fresh=QueryService.freshness(last_timestamp),
+        period_used=period_used,
+        period_start=period_start,
+        comparison=comparison,
+        recommendation_compliance=current_compliance.to_schema(window_hours=24),
+    )
 
 
 @router.get("/communities/{community_id}/units-summary", response_model=list[CommunityUnitSummaryItem])
 def community_units_summary(
     community_id: str,
     include_simulation: bool | None = None,
+    period: str = "all",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     ensure_community_access(community_id, current_user)
     resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
-    return build_units_summary(db, community_id, include_simulation=resolved_include_sim)
+    return build_units_summary(
+        db,
+        community_id,
+        include_simulation=resolved_include_sim,
+        period_start=period_start,
+        period_end=period_end,
+        period_used=period_used,
+    )
 
 
 @router.get("/communities/{community_id}/dashboard", response_model=DashboardResponse)
 def community_dashboard(
     community_id: str,
     include_simulation: bool | None = None,
+    period: str = "all",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     ensure_community_access(community_id, current_user)
     resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
-    snapshot = build_dashboard_snapshot(db, community_id, include_simulation=resolved_include_sim)
+    snapshot = build_dashboard_snapshot(
+        db,
+        community_id,
+        include_simulation=resolved_include_sim,
+        period_start=period_start,
+        period_end=period_end,
+        period_used=period_used,
+    )
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Not found")
     return snapshot
@@ -1340,12 +1440,25 @@ def unit_dashboard(
     community_id: str,
     unit_id: str,
     include_simulation: bool | None = None,
+    period: str = "all",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     _ensure_unit_operation_access(db, current_user, community_id, unit_id)
     resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
-    snapshot = build_unit_dashboard_snapshot(db, community_id, unit_id, include_simulation=resolved_include_sim)
+    snapshot = build_unit_dashboard_snapshot(
+        db,
+        community_id,
+        unit_id,
+        include_simulation=resolved_include_sim,
+        period_start=period_start,
+        period_end=period_end,
+        period_used=period_used,
+    )
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Not found")
     return snapshot
@@ -1355,24 +1468,47 @@ def unit_dashboard(
 def load_curve(
     community_id: str,
     include_simulation: bool | None = None,
+    period: str = "all",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    try:
+        _, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     ensure_community_access(community_id, current_user)
     resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
-    return build_load_curve(db, community_id, include_simulation=resolved_include_sim)
+    return build_load_curve(
+        db,
+        community_id,
+        include_simulation=resolved_include_sim,
+        period_start=period_start,
+        period_end=period_end,
+    )
 
 
 @router.get("/communities/{community_id}/peak-risk", response_model=PeakRiskResponse)
 def peak_risk(
     community_id: str,
     include_simulation: bool | None = None,
+    period: str = "all",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     ensure_community_access(community_id, current_user)
     resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
-    return build_peak_risk(db, community_id, include_simulation=resolved_include_sim)
+    return build_peak_risk(
+        db,
+        community_id,
+        include_simulation=resolved_include_sim,
+        period_start=period_start,
+        period_end=period_end,
+        period_used=period_used,
+    )
 
 
 @router.get("/communities/{community_id}/reports/export")

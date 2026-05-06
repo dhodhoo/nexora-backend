@@ -982,9 +982,19 @@ Response `200`:
 
 ### 4.7 Dashboard & Analytics
 
+Catatan umum analytics:
+- Query `period` didukung: `all|month|week` (default `all`).
+- Blok `recommendation_compliance` tersedia di response summary/dashboard:
+  - `total_recommendations`
+  - `followed_recommendations`
+  - `compliance_pct`
+  - `window_hours` (24)
+- Untuk `period=month|week`, blok `comparison` berisi juga `compliance_pct_point_delta`.
+
 #### `GET /units/{unit_id}/summary?community_id={community_id}`
 - Tujuan: summary konsumsi 1 unit.
 - Auth: Protected (scope check community).
+- Query opsional: `period=all|month|week` (default `all`).
 
 Response `200`:
 ```json
@@ -995,14 +1005,30 @@ Response `200`:
   "estimated_cost": 17819.0,
   "estimated_emission_kg_co2e": 10.489,
   "last_timestamp": "2026-05-05T10:00:00",
-  "is_fresh": true
+  "is_fresh": true,
+  "period_used": "month",
+  "period_start": "2026-05-01T00:00:00+00:00",
+  "recommendation_compliance": {
+    "total_recommendations": 12,
+    "followed_recommendations": 7,
+    "compliance_pct": 58.33,
+    "window_hours": 24
+  },
+  "comparison": {
+    "previous_period_start": "2026-04-01T00:00:00+00:00",
+    "previous_period_end": "2026-05-01T00:00:00+00:00",
+    "consumption_pct": -6.3,
+    "cost_pct": -6.3,
+    "emission_pct": -6.3,
+    "compliance_pct_point_delta": 12.0
+  }
 }
 ```
 
 #### `GET /communities/{community_id}/units-summary`
 - Tujuan: ringkasan semua unit (quick FE).
 - Auth: Protected (scope check community).
-- Query opsional: `include_simulation=true|false`.
+- Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
 
 Response `200`:
 ```json
@@ -1015,7 +1041,16 @@ Response `200`:
     "estimated_cost": 17819.0,
     "estimated_emission_kg_co2e": 10.489,
     "last_timestamp": "2026-05-05T10:00:00",
-    "is_fresh": true
+    "is_fresh": true,
+    "period_used": "month",
+    "period_start": "2026-05-01T00:00:00+00:00",
+    "comparison": {
+      "previous_period_start": "2026-04-01T00:00:00+00:00",
+      "previous_period_end": "2026-05-01T00:00:00+00:00",
+      "consumption_pct": -6.3,
+      "cost_pct": -6.3,
+      "emission_pct": -6.3
+    }
   }
 ]
 ```
@@ -1023,7 +1058,7 @@ Response `200`:
 #### `GET /communities/{community_id}/dashboard`
 - Tujuan: payload dashboard tunggal.
 - Auth: Protected (scope check community).
-- Query opsional: `include_simulation=true|false`.
+- Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
 
 Response `200`:
 ```json
@@ -1036,7 +1071,16 @@ Response `200`:
     "estimated_cost": 17819.0,
     "estimated_emission_kg_co2e": 10.489,
     "last_timestamp": "2026-05-05T10:00:00",
-    "is_fresh": true
+    "is_fresh": true,
+    "period_used": "month",
+    "period_start": "2026-05-01T00:00:00+00:00",
+    "comparison": {
+      "previous_period_start": "2026-04-01T00:00:00+00:00",
+      "previous_period_end": "2026-05-01T00:00:00+00:00",
+      "consumption_pct": -6.3,
+      "cost_pct": -6.3,
+      "emission_pct": -6.3
+    }
   },
   "units_summary": [],
   "load_curve": [],
@@ -1044,7 +1088,9 @@ Response `200`:
     "community_id": "C01",
     "peak_hour": null,
     "peak_kwh": 0.0,
-    "risk_level": "normal"
+    "risk_level": "normal",
+    "period_used": "month",
+    "period_start": "2026-05-01T00:00:00+00:00"
   },
   "ai_status": {
     "community_id": "C01",
@@ -1070,6 +1116,15 @@ Response `200`:
     ]
   },
   "include_simulation_used": false,
+  "period_used": "month",
+  "period_start": "2026-05-01T00:00:00+00:00",
+  "comparison": {
+    "previous_period_start": "2026-04-01T00:00:00+00:00",
+    "previous_period_end": "2026-05-01T00:00:00+00:00",
+    "consumption_pct": -6.3,
+    "cost_pct": -6.3,
+    "emission_pct": -6.3
+  },
   "generated_at": "2026-05-05T10:00:00+00:00"
 }
 ```
@@ -1077,7 +1132,7 @@ Response `200`:
 #### `GET /communities/{community_id}/units/{unit_id}/dashboard`
 - Tujuan: payload dashboard fokus 1 unit.
 - Auth: Protected (scope community + unit access).
-- Query opsional: `include_simulation=true|false`.
+- Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
 
 Response `200`:
 ```json
@@ -1092,16 +1147,36 @@ Response `200`:
     "estimated_cost": 4620.8,
     "estimated_emission_kg_co2e": 2.72,
     "last_timestamp": "2026-05-05T19:00:00",
-    "is_fresh": true
+    "is_fresh": true,
+    "period_used": "month",
+    "period_start": "2026-05-01T00:00:00+00:00",
+    "comparison": {
+      "previous_period_start": "2026-04-01T00:00:00+00:00",
+      "previous_period_end": "2026-05-01T00:00:00+00:00",
+      "consumption_pct": -6.3,
+      "cost_pct": -6.3,
+      "emission_pct": -6.3
+    }
   },
   "load_curve": [],
   "peak_risk": {
     "community_id": "C01",
     "peak_hour": null,
     "peak_kwh": 0.0,
-    "risk_level": "normal"
+    "risk_level": "normal",
+    "period_used": "month",
+    "period_start": "2026-05-01T00:00:00+00:00"
   },
   "ai_recommendations": [],
+  "period_used": "month",
+  "period_start": "2026-05-01T00:00:00+00:00",
+  "comparison": {
+    "previous_period_start": "2026-04-01T00:00:00+00:00",
+    "previous_period_end": "2026-05-01T00:00:00+00:00",
+    "consumption_pct": -6.3,
+    "cost_pct": -6.3,
+    "emission_pct": -6.3
+  },
   "generated_at": "2026-05-05T19:00:00+00:00"
 }
 ```
@@ -1109,7 +1184,7 @@ Response `200`:
 #### `GET /communities/{community_id}/load-curve`
 - Tujuan: kurva beban per jam.
 - Auth: Protected (scope check community).
-- Query opsional: `include_simulation=true|false`.
+- Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
 
 Response `200`:
 ```json
@@ -1124,7 +1199,7 @@ Response `200`:
 #### `GET /communities/{community_id}/peak-risk`
 - Tujuan: status risiko peak.
 - Auth: Protected (scope check community).
-- Query opsional: `include_simulation=true|false`.
+- Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
 
 Response `200`:
 ```json
@@ -1132,7 +1207,9 @@ Response `200`:
   "community_id": "C01",
   "peak_hour": "2026-05-05T19:00:00",
   "peak_kwh": 2.58,
-  "risk_level": "high"
+  "risk_level": "high",
+  "period_used": "month",
+  "period_start": "2026-05-01T00:00:00+00:00"
 }
 ```
 
