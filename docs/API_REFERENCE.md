@@ -1395,6 +1395,10 @@ Response `200`:
 - Auth: Protected (scope role-based).
 - Dapat update `qty` (`>=1`), `is_active`, selain metadata lain.
 - Gunakan field `schedules` (plural). Field tidak dikenal seperti `schedule` akan ditolak `400`.
+- Source-of-truth schedules:
+  - nilai `schedules` dari endpoint PUT/POST dipertahankan jika event MQTT berikutnya **tidak** menyertakan field `schedules`.
+  - nilai `schedules` juga dipertahankan jika MQTT mengirim `schedules: null`.
+  - overwrite dari MQTT hanya terjadi jika payload MQTT mengirim field `schedules` secara eksplisit.
 
 Body:
 ```json
@@ -1432,6 +1436,9 @@ Contoh error `400` (body kosong / no-op):
   "detail": "No updatable fields provided"
 }
 ```
+
+Troubleshooting singkat:
+- Jika FE melihat `schedules` kembali `null`, pastikan sumber event MQTT untuk device tersebut mengirim field `schedules` sesuai kontrak jika memang ingin override.
 
 #### `DELETE /units/{unit_id}/devices/{device_id}?community_id={community_id}`
 - Tujuan: hapus device dari unit.

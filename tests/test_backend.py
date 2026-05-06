@@ -1609,6 +1609,98 @@ def test_unit_device_update_strict_validation_and_schedule_update():
         assert item["schedules"] == [{"start_hour": 9, "end_hour": 11}]
 
 
+def test_mqtt_ingestion_without_schedules_does_not_clear_manual_schedules():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CMQTT").first():
+        db.add(Community(community_id="CMQTT", name="Community MQTT"))
+    if not db.query(Unit).filter(Unit.community_id == "CMQTT", Unit.unit_id == "UMQTT").first():
+        db.add(Unit(community_id="CMQTT", unit_id="UMQTT", va=2200))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        create = client.post(
+            "/units/UMQTT/devices",
+            params={"community_id": "CMQTT"},
+            json={
+                "device_id": "ac-mqtt",
+                "controllable": True,
+                "schedules": [{"start_hour": 18, "end_hour": 22}],
+            },
+            headers=headers,
+        )
+        assert create.status_code in (200, 400)
+
+        # Ingestion event without schedules should not wipe schedules set by PUT/POST.
+        db2 = SessionLocal()
+        IngestionService.ingest_event(
+            db2,
+            {
+                "community_id": "CMQTT",
+                "unit_id": "UMQTT",
+                "device_id": "ac-mqtt",
+                "timestamp": "2026-05-07T12:00:00+00:00",
+                "kwh": 1.1,
+                "controllable": True,
+            },
+            "energy/CMQTT/UMQTT/consumption",
+        )
+        # A payload with explicit schedules=null must also keep existing schedule.
+        IngestionService.ingest_event(
+            db2,
+            {
+                "community_id": "CMQTT",
+                "unit_id": "UMQTT",
+                "device_id": "ac-mqtt",
+                "timestamp": "2026-05-07T12:30:00+00:00",
+                "kwh": 1.05,
+                "controllable": True,
+                "schedules": None,
+            },
+            "energy/CMQTT/UMQTT/consumption",
+        )
+        db2.close()
+
+        listed = client.get(
+            "/units/UMQTT/devices",
+            params={"community_id": "CMQTT", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert listed.status_code == 200
+        item = next((x for x in listed.json()["items"] if x["device_id"] == "ac-mqtt"), None)
+        assert item is not None
+        assert item["schedules"] == [{"start_hour": 18, "end_hour": 22}]
+
+        # Ingestion event with explicit schedules should overwrite schedule value.
+        db3 = SessionLocal()
+        IngestionService.ingest_event(
+            db3,
+            {
+                "community_id": "CMQTT",
+                "unit_id": "UMQTT",
+                "device_id": "ac-mqtt",
+                "timestamp": "2026-05-07T13:00:00+00:00",
+                "kwh": 1.2,
+                "controllable": True,
+                "schedules": [{"start_hour": 9, "end_hour": 11}],
+            },
+            "energy/CMQTT/UMQTT/consumption",
+        )
+        db3.close()
+
+        listed_after = client.get(
+            "/units/UMQTT/devices",
+            params={"community_id": "CMQTT", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert listed_after.status_code == 200
+        item_after = next((x for x in listed_after.json()["items"] if x["device_id"] == "ac-mqtt"), None)
+        assert item_after is not None
+        assert item_after["schedules"] == [{"start_hour": 9, "end_hour": 11}]
+
+
 def test_period_month_week_filter_and_comparison():
     db = SessionLocal()
     if not db.query(Community).filter(Community.community_id == "CPER").first():
