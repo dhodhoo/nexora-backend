@@ -3,7 +3,7 @@ import csv
 import io
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, asc, desc, func, or_, select
 from sqlalchemy.orm import Session
@@ -65,6 +65,7 @@ from app.schemas import (
     PeakRiskResponse,
     PeriodComparison,
     RefreshRequest,
+    RegisterRequest,
     ResetPasswordRequest,
     TokenResponse,
     UnitCreateRequest,
@@ -193,10 +194,44 @@ def _validate_user_scope(
 ) -> None:
     if community_id and building_id:
         raise HTTPException(status_code=400, detail="community_id and building_id cannot both be set")
-    if role == UserRole.ADMIN:
-        return
-    if role in {UserRole.RESIDENT, UserRole.COORDINATOR, UserRole.BUILDING_MANAGER} and not unit_id:
-        raise HTTPException(status_code=400, detail="unit_id is required for this role")
+
+
+def _generate_unique_user_id(db: Session) -> str:
+    for _ in range(10):
+        candidate = AuthService.generate_user_id()
+        exists = db.execute(select(User.id).where(User.user_id == candidate)).first()
+        if not exists:
+            return candidate
+    raise HTTPException(status_code=500, detail="Failed to generate unique user_id")
+
+
+def _generate_unique_building_id(db: Session) -> str:
+    for _ in range(10):
+        candidate = AuthService.generate_user_id(prefix="bld")
+        exists = db.execute(select(Building.id).where(Building.building_id == candidate)).first()
+        if not exists:
+            return candidate
+    raise HTTPException(status_code=500, detail="Failed to generate unique building_id")
+
+
+def _building_manager_lookup(db: Session, building_ids: list[str]) -> dict[str, str]:
+    if not building_ids:
+        return {}
+    rows = db.execute(
+        select(User.user_id, User.building_id)
+        .where(
+            and_(
+                User.role == UserRole.BUILDING_MANAGER,
+                User.building_id.in_(building_ids),
+            )
+        )
+        .order_by(User.user_id.asc())
+    ).all()
+    lookup: dict[str, str] = {}
+    for user_id, building_id in rows:
+        if building_id and building_id not in lookup:
+            lookup[building_id] = user_id
+    return lookup
 
 
 def _apply_notification_scope(stmt, current_user: User):
@@ -319,9 +354,40 @@ def auth_login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
     if not user or not AuthService.verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if user.status != UserStatus.ACTIVE:
+    if not AuthService.can_authenticate(user):
         raise HTTPException(status_code=403, detail="Account is not active")
     return TokenResponse(access_token=AuthService.create_token(user, "access"), refresh_token=AuthService.create_token(user, "refresh"))
+
+
+@router.post("/auth/register", response_model=UserResponse, status_code=201)
+def auth_register(payload: RegisterRequest, db: Session = Depends(get_db)):
+    exists = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
+    if exists:
+        raise HTTPException(status_code=400, detail="User already exists")
+    user = User(
+        user_id=_generate_unique_user_id(db),
+        full_name=payload.full_name,
+        email=payload.email,
+        password_hash=AuthService.hash_password(payload.password),
+        role=UserRole.RESIDENT,
+        status=UserStatus.PENDING,
+        community_id=None,
+        building_id=None,
+        unit_id=None,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return UserResponse(
+        user_id=user.user_id,
+        full_name=user.full_name,
+        email=user.email,
+        role=user.role.value,
+        status=user.status.value,
+        community_id=user.community_id,
+        building_id=user.building_id,
+        unit_id=user.unit_id,
+    )
 
 
 @router.post("/auth/refresh", response_model=TokenResponse)
@@ -333,7 +399,7 @@ def auth_refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     if revoked:
         raise HTTPException(status_code=401, detail="Token revoked")
     user = db.execute(select(User).where(User.user_id == decoded.get("sub"))).scalar_one_or_none()
-    if not user or user.status != UserStatus.ACTIVE:
+    if not user or not AuthService.can_authenticate(user):
         raise HTTPException(status_code=401, detail="User not active")
     return TokenResponse(access_token=AuthService.create_token(user, "access"), refresh_token=AuthService.create_token(user, "refresh"))
 
@@ -458,6 +524,8 @@ def list_users(
     offset: int = 0,
     limit: int = 20,
     q: str | None = None,
+    role: str | None = None,
+    status_value: str | None = Query(default=None, alias="status"),
     db: Session = Depends(get_db),
     _: User = Depends(require_roles(UserRole.ADMIN)),
 ):
@@ -469,6 +537,20 @@ def list_users(
         condition = or_(User.user_id.ilike(pattern), User.email.ilike(pattern), User.full_name.ilike(pattern))
         stmt = stmt.where(condition)
         count_stmt = count_stmt.where(condition)
+    if role:
+        try:
+            role_enum = UserRole(role)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid role") from exc
+        stmt = stmt.where(User.role == role_enum)
+        count_stmt = count_stmt.where(User.role == role_enum)
+    if status_value:
+        try:
+            status_enum = UserStatus(status_value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid status") from exc
+        stmt = stmt.where(User.status == status_enum)
+        count_stmt = count_stmt.where(User.status == status_enum)
     total = int(db.execute(count_stmt).scalar_one())
     rows = db.execute(stmt.order_by(User.user_id).offset(offset).limit(limit)).scalars().all()
     items = [UserResponse(user_id=r.user_id, full_name=r.full_name, email=r.email, role=r.role.value, status=r.status.value, community_id=r.community_id, building_id=r.building_id, unit_id=r.unit_id) for r in rows]
@@ -477,22 +559,24 @@ def list_users(
 
 @router.post("/users", response_model=UserResponse)
 def create_user(payload: UserCreateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
-    exists = db.execute(select(User).where(or_(User.user_id == payload.user_id, User.email == payload.email))).scalar_one_or_none()
+    filters = [User.email == payload.email]
+    if payload.user_id:
+        filters.append(User.user_id == payload.user_id)
+    exists = db.execute(select(User).where(or_(*filters))).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="User already exists")
     role = UserRole(payload.role)
     status_value = UserStatus(payload.status)
-    _validate_user_scope(role=role, community_id=payload.community_id, building_id=payload.building_id, unit_id=payload.unit_id)
     user = User(
-        user_id=payload.user_id,
+        user_id=payload.user_id or _generate_unique_user_id(db),
         full_name=payload.full_name,
         email=payload.email,
         password_hash=AuthService.hash_password(payload.password),
         role=role,
         status=status_value,
-        community_id=payload.community_id,
-        building_id=payload.building_id,
-        unit_id=payload.unit_id,
+        community_id=None,
+        building_id=None,
+        unit_id=None,
     )
     db.add(user)
     db.commit()
@@ -517,7 +601,13 @@ def update_user(user_id: str, payload: UserUpdateRequest, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Not found")
     if current_user.role != UserRole.ADMIN and current_user.user_id != user_id:
         raise HTTPException(status_code=403, detail="Forbidden")
-    if current_user.role != UserRole.ADMIN and any([payload.role, payload.status, payload.community_id, payload.building_id, payload.unit_id]):
+    provided_fields = payload.model_fields_set
+    scope_fields = {"community_id", "building_id", "unit_id"}
+    if current_user.role != UserRole.ADMIN and (
+        payload.role is not None
+        or payload.status is not None
+        or bool(scope_fields & provided_fields)
+    ):
         raise HTTPException(status_code=403, detail="Only admin can change role/scope/status")
 
     if payload.full_name is not None:
@@ -528,16 +618,20 @@ def update_user(user_id: str, payload: UserUpdateRequest, db: Session = Depends(
         row.role = UserRole(payload.role)
     if payload.status is not None:
         row.status = UserStatus(payload.status)
-    if payload.community_id is not None or payload.building_id is not None or payload.unit_id is not None:
+    if scope_fields & provided_fields:
+        next_role = UserRole(payload.role) if payload.role else row.role
+        next_community_id = payload.community_id if "community_id" in provided_fields else row.community_id
+        next_building_id = payload.building_id if "building_id" in provided_fields else row.building_id
+        next_unit_id = payload.unit_id if "unit_id" in provided_fields else row.unit_id
         _validate_user_scope(
-            role=UserRole(payload.role) if payload.role else row.role,
-            community_id=payload.community_id,
-            building_id=payload.building_id,
-            unit_id=payload.unit_id,
+            role=next_role,
+            community_id=next_community_id,
+            building_id=next_building_id,
+            unit_id=next_unit_id,
         )
-        row.community_id = payload.community_id
-        row.building_id = payload.building_id
-        row.unit_id = payload.unit_id
+        row.community_id = next_community_id
+        row.building_id = next_building_id
+        row.unit_id = next_unit_id
     db.commit()
     db.refresh(row)
     return UserResponse(user_id=row.user_id, full_name=row.full_name, email=row.email, role=row.role.value, status=row.status.value, community_id=row.community_id, building_id=row.building_id, unit_id=row.unit_id)
@@ -558,20 +652,29 @@ def list_buildings(offset: int = 0, limit: int = 20, db: Session = Depends(get_d
     limit = _validate_pagination(offset, limit)
     total = int(db.execute(select(func.count(Building.id))).scalar_one())
     rows = db.execute(select(Building).order_by(Building.building_id).offset(offset).limit(limit)).scalars().all()
-    items = [BuildingResponse(building_id=r.building_id, name=r.name) for r in rows]
+    manager_lookup = _building_manager_lookup(db, [r.building_id for r in rows])
+    items = [
+        BuildingResponse(
+            building_id=r.building_id,
+            name=r.name,
+            manager_user_id=manager_lookup.get(r.building_id),
+        )
+        for r in rows
+    ]
     return {"items": items, "meta": _meta(total, offset, limit)}
 
 
 @router.post("/buildings", response_model=BuildingResponse)
 def create_building(payload: BuildingCreateRequest, db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN))):
-    exists = db.execute(select(Building).where(Building.building_id == payload.building_id)).scalar_one_or_none()
+    building_id = payload.building_id or _generate_unique_building_id(db)
+    exists = db.execute(select(Building).where(Building.building_id == building_id)).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="Building already exists")
-    b = Building(building_id=payload.building_id, name=payload.name)
+    b = Building(building_id=building_id, name=payload.name)
     db.add(b)
     db.commit()
     db.refresh(b)
-    return BuildingResponse(building_id=b.building_id, name=b.name)
+    return BuildingResponse(building_id=b.building_id, name=b.name, manager_user_id=None)
 
 
 @router.get("/buildings/{building_id}", response_model=BuildingDetailResponse)
@@ -582,7 +685,12 @@ def get_building(building_id: str, db: Session = Depends(get_db), current_user: 
     row = db.execute(select(Building).where(Building.building_id == building_id)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    return BuildingDetailResponse(building_id=row.building_id, name=row.name)
+    manager_lookup = _building_manager_lookup(db, [row.building_id])
+    return BuildingDetailResponse(
+        building_id=row.building_id,
+        name=row.name,
+        manager_user_id=manager_lookup.get(row.building_id),
+    )
 
 
 @router.put("/buildings/{building_id}", response_model=BuildingDetailResponse)
@@ -601,7 +709,12 @@ def update_building(
     row.name = payload.name
     db.commit()
     db.refresh(row)
-    return BuildingDetailResponse(building_id=row.building_id, name=row.name)
+    manager_lookup = _building_manager_lookup(db, [row.building_id])
+    return BuildingDetailResponse(
+        building_id=row.building_id,
+        name=row.name,
+        manager_user_id=manager_lookup.get(row.building_id),
+    )
 
 
 @router.delete("/buildings/{building_id}")

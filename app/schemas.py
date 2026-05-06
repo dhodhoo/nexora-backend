@@ -315,6 +315,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    full_name: str
+    email: str
+    password: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
@@ -358,15 +364,12 @@ class MeDashboardResponse(BaseModel):
 
 
 class UserCreateRequest(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
     full_name: str
     email: str
     password: str
     role: str
     status: str = "PENDING"
-    community_id: Optional[str] = None
-    building_id: Optional[str] = None
-    unit_id: Optional[str] = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -435,7 +438,7 @@ class ResetPasswordRequest(BaseModel):
 
 
 class BuildingCreateRequest(BaseModel):
-    building_id: str
+    building_id: Optional[str] = None
     name: Optional[str] = None
 
 
@@ -446,11 +449,13 @@ class BuildingUpdateRequest(BaseModel):
 class BuildingResponse(BaseModel):
     building_id: str
     name: Optional[str] = None
+    manager_user_id: Optional[str] = None
 
 
 class BuildingDetailResponse(BaseModel):
     building_id: str
     name: Optional[str] = None
+    manager_user_id: Optional[str] = None
 
 
 class BuildingsListResponse(BaseModel):

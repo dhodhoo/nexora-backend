@@ -22,12 +22,20 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 class AuthService:
     @staticmethod
+    def generate_user_id(prefix: str = "usr") -> str:
+        return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+    @staticmethod
     def hash_password(password: str) -> str:
         return pwd_context.hash(password)
 
     @staticmethod
     def verify_password(password: str, password_hash: str) -> bool:
         return pwd_context.verify(password, password_hash)
+
+    @staticmethod
+    def can_authenticate(user: User) -> bool:
+        return user.status not in {UserStatus.INACTIVE, UserStatus.DELETED}
 
     @staticmethod
     def _encode(payload: dict[str, Any]) -> str:
@@ -94,7 +102,7 @@ def get_current_user(
     user = db.execute(select(User).where(User.user_id == payload.get("sub"))).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    if user.status != UserStatus.ACTIVE:
+    if not AuthService.can_authenticate(user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is not active")
 
     request.state.current_user = user

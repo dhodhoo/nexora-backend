@@ -159,6 +159,34 @@ Response `200`:
 }
 ```
 
+#### `POST /auth/register`
+- Tujuan: registrasi user baru sebelum di-assign admin.
+- Auth: Public.
+- Catatan: user hasil register berstatus `PENDING` dan tetap boleh login.
+
+Body:
+```json
+{
+  "full_name": "Resident Baru",
+  "email": "resident@example.com",
+  "password": "password12345"
+}
+```
+
+Response `201`:
+```json
+{
+  "user_id": "usr-a1b2c3d4e5f6",
+  "full_name": "Resident Baru",
+  "email": "resident@example.com",
+  "role": "ROLE_RESIDENT",
+  "status": "PENDING",
+  "community_id": null,
+  "building_id": null,
+  "unit_id": null
+}
+```
+
 #### `POST /auth/logout`
 - Tujuan: revoke refresh token.
 - Auth: Protected.
@@ -232,7 +260,12 @@ Response `200`:
 #### `GET /users`
 - Tujuan: list user (admin only).
 - Auth: Protected (`ROLE_ADMIN`).
-- Query: `offset`, `limit`, `q`.
+- Query: `offset`, `limit`, `q`, `role`, `status`.
+
+Contoh:
+- `GET /users?role=ROLE_COORDINATOR`
+- `GET /users?status=ACTIVE`
+- `GET /users?q=andi&role=ROLE_RESIDENT&status=PENDING`
 
 Response `200`:
 ```json
@@ -261,32 +294,33 @@ Response `200`:
 #### `POST /users`
 - Tujuan: create user baru (admin only).
 - Auth: Protected (`ROLE_ADMIN`).
+- Catatan:
+  - `user_id` optional. Jika tidak dikirim, backend akan generate otomatis.
+  - `community_id`, `building_id`, dan `unit_id` tidak dikirim saat create.
+  - assignment scope dilakukan belakangan lewat `PUT /users/{user_id}`.
 
 Body:
 ```json
 {
-  "user_id": "coord-001",
   "full_name": "Koordinator C01",
   "email": "coord.c01@nexora.local",
   "password": "Password123!",
   "role": "ROLE_COORDINATOR",
-  "status": "ACTIVE",
-  "community_id": "C01",
-  "building_id": null,
-  "unit_id": "U01"
+  "status": "ACTIVE"
 }
 ```
 
 Response `200`:
 ```json
 {
-  "user_id": "coord-001",
+  "user_id": "usr-a1b2c3d4e5f6",
   "full_name": "Koordinator C01",
   "email": "coord.c01@nexora.local",
   "role": "ROLE_COORDINATOR",
   "status": "ACTIVE",
   "community_id": "C01",
-  "building_id": null
+  "building_id": null,
+  "unit_id": null
 }
 ```
 
@@ -304,9 +338,14 @@ Contoh body:
 ```json
 {
   "full_name": "Nama Baru",
-  "email": "baru@nexora.local"
+  "email": "baru@nexora.local",
+  "community_id": "C01",
+  "unit_id": "U01"
 }
 ```
+
+Catatan:
+- assignment `community_id`, `building_id`, dan `unit_id` dilakukan di endpoint ini.
 
 Response `200`: shape `UserResponse`.
 
@@ -344,7 +383,8 @@ Response `200`:
   "items": [
     {
       "building_id": "B01",
-      "name": "Tower A"
+      "name": "Tower A",
+      "manager_user_id": "mgr-b01"
     }
   ],
   "meta": {
@@ -359,11 +399,11 @@ Response `200`:
 #### `POST /buildings`
 - Tujuan: create building.
 - Auth: Protected (`ROLE_ADMIN`).
+- Catatan: `building_id` optional. Jika tidak dikirim, backend akan generate otomatis.
 
 Body:
 ```json
 {
-  "building_id": "B01",
   "name": "Tower A"
 }
 ```
@@ -371,8 +411,9 @@ Body:
 Response `200`:
 ```json
 {
-  "building_id": "B01",
-  "name": "Tower A"
+  "building_id": "bld-a1b2c3d4e5f6",
+  "name": "Tower A",
+  "manager_user_id": null
 }
 ```
 
@@ -384,7 +425,8 @@ Response `200`:
 ```json
 {
   "building_id": "B01",
-  "name": "Tower A"
+  "name": "Tower A",
+  "manager_user_id": "mgr-b01"
 }
 ```
 

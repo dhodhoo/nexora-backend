@@ -45,7 +45,7 @@ from fastapi.testclient import TestClient
 
 from app.database import Base, SessionLocal, engine
 from app.main import app
-from app.models import AIAnalysisResult, Building, BuildingUnit, Community, DeviceCommand, Unit, User
+from app.models import AIAnalysisResult, Building, BuildingUnit, Community, DeviceCommand, Unit, User, UserRole, UserStatus
 from app.services.ai_integration import ai_orchestrator
 from app.services.ingestion import IngestionService
 from app.utils.time import utc_now
@@ -68,6 +68,206 @@ def test_health_contract():
         res = client.get("/health")
         assert res.status_code == 200
         assert res.json() == {"status": "ok"}
+
+
+def test_auth_register_creates_pending_user_with_generated_id():
+    with TestClient(app) as client:
+        res = client.post(
+            "/auth/register",
+            json={
+                "full_name": "Register User",
+                "email": "register-user@nexora.local",
+                "password": "register12345",
+            },
+        )
+        assert res.status_code == 201
+        body = res.json()
+        assert body["user_id"].startswith("usr-")
+        assert body["role"] == "ROLE_RESIDENT"
+        assert body["status"] == "PENDING"
+        assert body["unit_id"] is None
+
+        login = client.post(
+            "/auth/login",
+            json={"email": "register-user@nexora.local", "password": "register12345"},
+        )
+        assert login.status_code == 200
+        token = login.json()["access_token"]
+        me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me.status_code == 200
+        assert me.json()["status"] == "PENDING"
+
+
+def test_admin_create_user_auto_generates_user_id_and_unit_id_optional():
+    db = SessionLocal()
+    if not db.query(Building).filter(Building.building_id == "B-AUTO").first():
+        db.add(Building(building_id="B-AUTO", name="Tower Auto"))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.post(
+            "/users",
+            json={
+                "full_name": "Auto Manager",
+                "email": "auto-manager@nexora.local",
+                "password": "manager12345",
+                "role": "ROLE_BUILDING_MANAGER",
+                "status": "ACTIVE",
+            },
+            headers=headers,
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["user_id"].startswith("usr-")
+        assert body["role"] == "ROLE_BUILDING_MANAGER"
+        assert body["unit_id"] is None
+        assert body["building_id"] is None
+
+
+def test_update_user_can_clear_building_assignment_with_null():
+    db = SessionLocal()
+    if not db.query(Building).filter(Building.building_id == "B-CLEAR").first():
+        db.add(Building(building_id="B-CLEAR", name="Tower Clear"))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        created = client.post(
+            "/users",
+            json={
+                "user_id": "mgr-clear",
+                "full_name": "Manager Clear",
+                "email": "mgr-clear@nexora.local",
+                "password": "manager12345",
+                "role": "ROLE_BUILDING_MANAGER",
+                "status": "PENDING",
+            },
+            headers=headers,
+        )
+        assert created.status_code in (200, 400)
+
+        assigned = client.put(
+            "/users/mgr-clear",
+            json={"building_id": "B-CLEAR"},
+            headers=headers,
+        )
+        assert assigned.status_code == 200
+        assert assigned.json()["building_id"] == "B-CLEAR"
+
+        cleared = client.put(
+            "/users/mgr-clear",
+            json={"building_id": None},
+            headers=headers,
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["building_id"] is None
+
+
+def test_list_users_supports_role_and_status_filters():
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        coord_create = client.post(
+            "/users",
+            json={
+                "user_id": "coord-filter",
+                "full_name": "Coordinator Filter",
+                "email": "coord-filter@nexora.local",
+                "password": "coord12345",
+                "role": "ROLE_COORDINATOR",
+                "status": "ACTIVE",
+            },
+            headers=headers,
+        )
+        assert coord_create.status_code in (200, 400)
+
+        resident_create = client.post(
+            "/users",
+            json={
+                "user_id": "resident-filter",
+                "full_name": "Resident Filter",
+                "email": "resident-filter@nexora.local",
+                "password": "resident12345",
+                "role": "ROLE_RESIDENT",
+                "status": "PENDING",
+            },
+            headers=headers,
+        )
+        assert resident_create.status_code in (200, 400)
+
+        by_role = client.get("/users", params={"role": "ROLE_COORDINATOR"}, headers=headers)
+        assert by_role.status_code == 200
+        role_items = by_role.json()["items"]
+        assert any(item["user_id"] == "coord-filter" for item in role_items)
+        assert all(item["role"] == "ROLE_COORDINATOR" for item in role_items)
+
+        by_status = client.get("/users", params={"status": "PENDING"}, headers=headers)
+        assert by_status.status_code == 200
+        status_items = by_status.json()["items"]
+        assert any(item["user_id"] == "resident-filter" for item in status_items)
+        assert all(item["status"] == "PENDING" for item in status_items)
+
+        combined = client.get(
+            "/users",
+            params={"q": "coord-filter", "role": "ROLE_COORDINATOR", "status": "ACTIVE"},
+            headers=headers,
+        )
+        assert combined.status_code == 200
+        combined_items = combined.json()["items"]
+        assert any(item["user_id"] == "coord-filter" for item in combined_items)
+        assert all(item["role"] == "ROLE_COORDINATOR" and item["status"] == "ACTIVE" for item in combined_items)
+
+
+def test_create_building_auto_generates_building_id():
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.post(
+            "/buildings",
+            json={
+                "name": "Tower Auto Generated",
+            },
+            headers=headers,
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["building_id"].startswith("bld-")
+        assert body["name"] == "Tower Auto Generated"
+
+
+def test_building_responses_include_manager_user_id():
+    db = SessionLocal()
+    if not db.query(Building).filter(Building.building_id == "B-MGR").first():
+        db.add(Building(building_id="B-MGR", name="Tower Manager"))
+    if not db.query(User).filter(User.user_id == "mgr-building").first():
+        db.add(
+            User(
+                user_id="mgr-building",
+                full_name="Manager Building",
+                email="mgr-building@nexora.local",
+                password_hash="hashed",
+                role=UserRole.BUILDING_MANAGER,
+                status=UserStatus.ACTIVE,
+                building_id="B-MGR",
+            )
+        )
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        detail = client.get("/buildings/B-MGR", headers=headers)
+        assert detail.status_code == 200
+        assert detail.json()["manager_user_id"] == "mgr-building"
+
+        listed = client.get("/buildings", headers=headers)
+        assert listed.status_code == 200
+        row = next((item for item in listed.json()["items"] if item["building_id"] == "B-MGR"), None)
+        assert row is not None
+        assert row["manager_user_id"] == "mgr-building"
 
 
 def test_ingestion_and_unit_summary():
@@ -640,13 +840,17 @@ def test_building_manager_scope_access_enforced():
                 "password": "manager12345",
                 "role": "ROLE_BUILDING_MANAGER",
                 "status": "ACTIVE",
-                "building_id": "B01",
-                "unit_id": "U01",
             },
             headers=admin_headers,
         )
         # idempotent for reruns
         assert create_manager.status_code in (200, 400)
+        assign_manager = client.put(
+            "/users/mgr-b01",
+            json={"building_id": "B01"},
+            headers=admin_headers,
+        )
+        assert assign_manager.status_code == 200
 
         login_mgr = client.post("/auth/login", json={"email": "mgr-b01@nexora.local", "password": "manager12345"})
         assert login_mgr.status_code == 200
@@ -699,7 +903,6 @@ def test_community_members_crud_and_scope():
                 "password": "resident12345",
                 "role": "ROLE_RESIDENT",
                 "status": "ACTIVE",
-                "unit_id": "U01",
             },
             headers=admin_headers,
         )
@@ -724,12 +927,16 @@ def test_community_members_crud_and_scope():
                 "password": "coord12345",
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
-                "community_id": "C03",
-                "unit_id": "U01",
             },
             headers=admin_headers,
         )
         assert create_coord.status_code in (200, 400)
+        assign_coord = client.put(
+            "/users/coord-c03",
+            json={"community_id": "C03", "unit_id": "U01"},
+            headers=admin_headers,
+        )
+        assert assign_coord.status_code == 200
 
         create_other_community = client.post(
             "/communities",
@@ -773,12 +980,16 @@ def test_community_members_assign_user_with_building_scope_rejected():
                 "password": "manager12345",
                 "role": "ROLE_BUILDING_MANAGER",
                 "status": "ACTIVE",
-                "building_id": "B05",
-                "unit_id": "U01",
             },
             headers=admin_headers,
         )
         assert create_user.status_code in (200, 400)
+        assign_user = client.put(
+            "/users/mgr-b05",
+            json={"building_id": "B05"},
+            headers=admin_headers,
+        )
+        assert assign_user.status_code == 200
         add = client.post("/communities/C05/members", json={"user_id": "mgr-b05"}, headers=admin_headers)
         assert add.status_code == 400
 
@@ -808,12 +1019,16 @@ def test_me_dashboard_role_aware_contract():
                 "password": "coord12345",
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
-                "community_id": "C06",
-                "unit_id": "U06",
             },
             headers=admin_headers,
         )
         assert create_coord.status_code in (200, 400)
+        assign_coord = client.put(
+            "/users/coord-c06",
+            json={"community_id": "C06", "unit_id": "U06"},
+            headers=admin_headers,
+        )
+        assert assign_coord.status_code == 200
         login_coord = client.post("/auth/login", json={"email": "coord-c06@nexora.local", "password": "coord12345"})
         assert login_coord.status_code == 200
         coord_headers = {"Authorization": f"Bearer {login_coord.json()['access_token']}"}
@@ -856,12 +1071,16 @@ def test_simulation_toggle_and_status_contract_admin_and_coordinator():
                 "password": "coord12345",
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
-                "community_id": "C07",
-                "unit_id": "U01",
             },
             headers=admin_headers,
         )
         assert create_coord.status_code in (200, 400)
+        assign_coord = client.put(
+            "/users/coord-c07",
+            json={"community_id": "C07", "unit_id": "U01"},
+            headers=admin_headers,
+        )
+        assert assign_coord.status_code == 200
 
         login_coord = client.post("/auth/login", json={"email": "coord-c07@nexora.local", "password": "coord12345"})
         assert login_coord.status_code == 200
@@ -888,12 +1107,16 @@ def test_simulation_endpoint_role_restriction():
                 "password": "manager12345",
                 "role": "ROLE_BUILDING_MANAGER",
                 "status": "ACTIVE",
-                "building_id": "B01",
-                "unit_id": "U01",
             },
             headers=admin_headers,
         )
         assert create_manager.status_code in (200, 400)
+        assign_manager = client.put(
+            "/users/mgr-sim",
+            json={"building_id": "B01"},
+            headers=admin_headers,
+        )
+        assert assign_manager.status_code == 200
 
         login_mgr = client.post("/auth/login", json={"email": "mgr-sim@nexora.local", "password": "manager12345"})
         assert login_mgr.status_code == 200
@@ -980,12 +1203,16 @@ def test_ai_run_now_rate_limit_for_coordinator():
                 "password": "coord12345",
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
-                "community_id": "CRATE",
-                "unit_id": "URATE",
             },
             headers=headers,
         )
         assert create_coord.status_code in (200, 400)
+        assign_coord = client.put(
+            "/users/coord-crate",
+            json={"community_id": "CRATE", "unit_id": "URATE"},
+            headers=headers,
+        )
+        assert assign_coord.status_code == 200
         login_coord = client.post("/auth/login", json={"email": "coord-crate@nexora.local", "password": "coord12345"})
         assert login_coord.status_code == 200
         coord_headers = {"Authorization": f"Bearer {login_coord.json()['access_token']}"}
@@ -1044,12 +1271,16 @@ def test_include_simulation_query_behavior():
                 "password": "coord12345",
                 "role": "ROLE_COORDINATOR",
                 "status": "ACTIVE",
-                "community_id": "CSIM",
-                "unit_id": "USIM",
             },
             headers=admin_headers,
         )
         assert create_coord.status_code in (200, 400)
+        assign_coord = client.put(
+            "/users/coord-csim",
+            json={"community_id": "CSIM", "unit_id": "USIM"},
+            headers=admin_headers,
+        )
+        assert assign_coord.status_code == 200
         login_coord = client.post("/auth/login", json={"email": "coord-csim@nexora.local", "password": "coord12345"})
         assert login_coord.status_code == 200
         coord_headers = {"Authorization": f"Bearer {login_coord.json()['access_token']}"}
