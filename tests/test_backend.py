@@ -1180,6 +1180,8 @@ def test_building_analytics_notifications_and_config():
         assert cbody["building_id"] == "B01"
         assert "series" in cbody
         assert "total_kwh" in cbody
+        assert cbody["total_kwh"] > 0
+        assert len(cbody["series"]) >= 1
 
         predictions = client.get("/buildings/B01/predictions", headers=headers)
         assert predictions.status_code == 200

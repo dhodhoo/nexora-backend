@@ -207,6 +207,14 @@ def _building_available_floors(db: Session, building_id: str) -> list[int]:
     return sorted(floors)
 
 
+def _building_reading_scope(building_id: str, unit_ids: list[str]):
+    direct_condition = EnergyReading.building_id == building_id
+    if not unit_ids:
+        return direct_condition
+    fallback_condition = and_(EnergyReading.building_id.is_(None), EnergyReading.unit_id.in_(unit_ids))
+    return or_(direct_condition, fallback_condition)
+
+
 def _ensure_community_member_manager_access(community_id: str, user: User) -> None:
     if user.role == UserRole.ADMIN:
         return
@@ -1060,7 +1068,7 @@ def building_reports_export(
     total_kwh = 0.0
     total_cost = 0.0
     for uid in unit_ids:
-        conditions = [EnergyReading.unit_id == uid]
+        conditions = [or_(EnergyReading.building_id == building_id, and_(EnergyReading.building_id.is_(None), EnergyReading.unit_id == uid))]
         if start_dt:
             conditions.append(EnergyReading.timestamp >= start_dt.replace(tzinfo=None))
         if end_dt:
@@ -1099,7 +1107,9 @@ def building_consumption(
         raise HTTPException(status_code=400, detail="Invalid window")
     hours = max(1, min(hours, 24 * 30))
     unit_ids = _building_unit_ids(db, building_id)
-    if not unit_ids:
+    reading_scope = _building_reading_scope(building_id, unit_ids)
+    existing_reading = db.execute(select(EnergyReading.id).where(reading_scope).limit(1)).first()
+    if not unit_ids and not existing_reading:
         return BuildingConsumptionResponse(
             building_id=building_id, series=[], total_kwh=0.0, estimated_cost=0.0, last_timestamp=None, is_fresh=False
         )
@@ -1109,7 +1119,7 @@ def building_consumption(
         else func.to_char(func.date_trunc("day", EnergyReading.timestamp), "YYYY-MM-DD")
     )
     since = assume_utc(utc_now() - timedelta(hours=hours)).replace(tzinfo=None)
-    conditions = [EnergyReading.unit_id.in_(unit_ids), EnergyReading.timestamp >= since]
+    conditions = [reading_scope, EnergyReading.timestamp >= since]
     if current_user.role != UserRole.ADMIN:
         conditions.append(EnergyReading.is_simulation.is_(False))
     rows = db.execute(

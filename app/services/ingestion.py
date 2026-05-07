@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Community, DeadLetter, Device, DeviceStateHistory, EnergyReading, Unit
+from app.models import BuildingUnit, Community, DeadLetter, Device, DeviceStateHistory, EnergyReading, Unit
 from app.schemas import ConsumptionEvent
 from app.services.tariff import TariffService
 from app.services.realtime_ws import dashboard_ws_manager
@@ -42,6 +42,10 @@ class IngestionService:
                 db.flush()
 
             tariff = TariffService.get_tariff_by_va(db, unit.va)
+            building_link = db.execute(
+                select(BuildingUnit.building_id).where(BuildingUnit.unit_id == event.unit_id).order_by(BuildingUnit.building_id.asc())
+            ).first()
+            building_id = building_link[0] if building_link else None
 
             device = db.execute(
                 select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == event.device_id))
@@ -77,6 +81,7 @@ class IngestionService:
                     )
 
             reading = EnergyReading(
+                building_id=building_id,
                 community_id=event.community_id,
                 unit_id=event.unit_id,
                 device_id=event.device_id,

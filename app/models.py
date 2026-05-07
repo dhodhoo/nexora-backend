@@ -176,6 +176,7 @@ class EnergyReading(Base):
     __tablename__ = "energy_readings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    building_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     community_id: Mapped[str] = mapped_column(String(32), index=True)
     unit_id: Mapped[str] = mapped_column(String(32), index=True)
     device_id: Mapped[str] = mapped_column(String(64), index=True)
