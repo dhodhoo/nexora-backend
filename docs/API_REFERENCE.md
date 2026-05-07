@@ -7,6 +7,7 @@ Dokumen ini adalah referensi utama endpoint backend Nexora untuk tim Backend, Fr
 - Base URL lokal: `http://127.0.0.1:8100`
 - Format body request: `application/json`
 - Format response: `application/json`
+- Source of truth endpoint + contoh payload/response: dokumen ini (`API_REFERENCE.md`).
 - Auth:
   - Public endpoint: `/health`, `/auth/login`, `/auth/refresh`
   - Endpoint lain: wajib `Authorization: Bearer <access_token>`
@@ -1945,6 +1946,260 @@ Jika unauthorized atau scope tidak cocok:
 - Scope: non-admin harus lolos scope community + unit.
 
 Payload awal:
+```json
+{
+  "type": "unit_dashboard_snapshot",
+  "community_id": "C01",
+  "unit_id": "U01",
+  "data": {
+    "community_id": "C01",
+    "unit_id": "U01",
+    "unit_summary": {},
+    "load_curve": [],
+    "peak_risk": {},
+    "ai_recommendations": [],
+    "generated_at": "2026-05-05T19:00:00+00:00"
+  }
+}
+```
+
+---
+
+### 4.11 Canonical Path & Example Addendum (Semua Endpoint Aktif)
+
+Section ini merapikan endpoint yang sebelumnya ditulis dengan query inline di judul.  
+Semua contoh di bawah adalah **contoh sukses (`2xx`)** dengan format path canonical.
+
+#### `GET /units/{unit_id}/summary`
+- Query contoh: `community_id=C01&period=month`
+- Header:
+```http
+Authorization: Bearer <access_token>
+```
+- Response `200` (contoh ringkas):
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "total_kwh": 124.5,
+  "estimated_cost": 179890.0,
+  "estimated_emission_kg_co2e": 105.825,
+  "device_emissions": [],
+  "period_used": "month",
+  "period_start": "2026-05-01T00:00:00+00:00"
+}
+```
+
+#### `GET /units/{unit_id}/emissions/daily`
+- Query contoh: `community_id=C01&days=30&period=month`
+- Response `200`:
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "period_used": "month",
+  "series": [
+    {"date": "2026-05-01", "total_kwh": 5.6, "estimated_emission_kg_co2e": 4.76}
+  ],
+  "total_emission_kg_co2e": 42.5
+}
+```
+
+#### `GET /units/{unit_id}/reports/history`
+- Query contoh: `community_id=C01&limit=12&offset=0`
+- Response `200`:
+```json
+{
+  "items": [
+    {
+      "period": "2026-05",
+      "total_kwh": 111.2,
+      "estimated_cost": 160686.64,
+      "estimated_emission_kg_co2e": 94.52
+    }
+  ],
+  "meta": {"total": 1, "offset": 0, "limit": 12, "has_next": false, "unread_count": null}
+}
+```
+
+#### `GET /units/{unit_id}/reports/export`
+- Query contoh: `community_id=C01&format=pdf&period=2026-05`
+- Response `200`: file attachment (bukan JSON)
+  - `Content-Type`: `application/pdf` / `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` / `text/csv`
+  - `Content-Disposition`: `attachment; filename="unit_U01_report_2026-05.pdf"`
+
+#### `GET /units/{unit_id}/devices`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "items": [
+    {
+      "device_id": "ac",
+      "device_name": "Air Conditioner",
+      "qty": 1,
+      "is_active": true,
+      "controllable": true,
+      "schedules": [{"start_hour": 18, "end_hour": 22}]
+    }
+  ],
+  "meta": {"total": 1, "offset": 0, "limit": 20, "has_next": false, "unread_count": null}
+}
+```
+
+#### `POST /units/{unit_id}/devices`
+- Query contoh: `community_id=C01`
+- Body contoh:
+```json
+{
+  "device_id": "ac",
+  "qty": 2,
+  "is_active": true,
+  "controllable": true,
+  "schedules": [{"hours": [18, 19, 20, 21, 22]}]
+}
+```
+- Response `200`:
+```json
+{
+  "device_id": "ac",
+  "device_name": "Air Conditioner",
+  "qty": 2,
+  "is_active": true,
+  "controllable": true,
+  "schedules": [{"start_hour": 18, "end_hour": 22}]
+}
+```
+
+#### `PUT /units/{unit_id}/devices/{device_id}`
+- Query contoh: `community_id=C01`
+- Body contoh:
+```json
+{
+  "qty": 3,
+  "is_active": false,
+  "controllable": true,
+  "schedules": [{"hours": [17, 18, 19]}]
+}
+```
+- Response `200`: shape sama seperti `POST /units/{unit_id}/devices`.
+
+#### `DELETE /units/{unit_id}/devices/{device_id}`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{"status":"deleted","unit_id":"U01","device_id":"ac"}
+```
+
+#### `POST /units/{unit_id}/devices/{device_id}/control`
+- Query contoh: `community_id=C01`
+- Body contoh:
+```json
+{"action":"on"}
+```
+- Response `200`:
+```json
+{
+  "status": "sent",
+  "community_id": "C01",
+  "unit_id": "U01",
+  "device_id": "ac",
+  "action": "on"
+}
+```
+
+#### `PUT /units/{unit_id}/va`
+- Query contoh: `community_id=C01`
+- Body contoh:
+```json
+{"va":2200}
+```
+- Response `200`:
+```json
+{"community_id":"C01","unit_id":"U01","va":2200}
+```
+
+#### `GET /units/{unit_id}/ai-recommendations`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "exists": true,
+  "status": "success",
+  "recommendations": []
+}
+```
+
+#### `GET /ai/last-result`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "community_id": "C01",
+  "exists": true,
+  "status": "success",
+  "result": {}
+}
+```
+
+#### `GET /ai/status`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "community_id": "C01",
+  "exists": true,
+  "healthy": true,
+  "stale": false,
+  "source": "scheduler"
+}
+```
+
+#### `POST /ai/run-now`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "status": "success",
+  "community_id": "C01",
+  "processed_samples": 24,
+  "successful_samples": 24
+}
+```
+
+#### `GET /buildings/{building_id}/reports/export`
+- Query contoh: `format=csv&period_start=2026-05-01&period_end=2026-05-31`
+- Response `200`: file attachment (CSV).
+
+#### `GET /communities/{community_id}/reports/export`
+- Query contoh: `format=csv&period_start=2026-05-01&period_end=2026-05-31`
+- Response `200`: file attachment (CSV).
+
+#### `WEBSOCKET /ws/communities/{community_id}/dashboard`
+- Contoh koneksi:
+  - `ws://127.0.0.1:8100/ws/communities/C01/dashboard?token=<access_token>`
+- Payload sukses pertama (snapshot):
+```json
+{
+  "type": "dashboard_snapshot",
+  "community_id": "C01",
+  "data": {
+    "community": {},
+    "units_summary": [],
+    "load_curve": [],
+    "peak_risk": {},
+    "ai_status": {},
+    "generated_at": "2026-05-05T10:00:00+00:00"
+  }
+}
+```
+
+#### `WEBSOCKET /ws/communities/{community_id}/units/{unit_id}/dashboard`
+- Contoh koneksi:
+  - `ws://127.0.0.1:8100/ws/communities/C01/units/U01/dashboard?token=<access_token>`
+- Payload sukses pertama (snapshot):
 ```json
 {
   "type": "unit_dashboard_snapshot",

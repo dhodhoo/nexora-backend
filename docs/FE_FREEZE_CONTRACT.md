@@ -1,6 +1,7 @@
 # FE Freeze Contract (Final) - Nexora Backend
 
 Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada fase demo saat ini.
+Referensi endpoint + contoh payload/response resmi: [API_REFERENCE.md](/D:/nexora/nexora-backend/docs/API_REFERENCE.md).
 
 ## 1) Base & Auth
 - Base URL: `http://127.0.0.1:8100`
