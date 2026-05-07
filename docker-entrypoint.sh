@@ -14,7 +14,7 @@ for i in range(60):
             conn.execute(text("SELECT 1"))
         print("[entrypoint] postgres ready")
         break
-    except Exception as e:
+    except Exception:
         if i == 59:
             raise
         time.sleep(2)
