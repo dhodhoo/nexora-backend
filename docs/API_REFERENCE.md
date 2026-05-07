@@ -570,6 +570,9 @@ Response `200`:
 #### `GET /buildings/{building_id}/consumption`
 - Tujuan: ringkasan konsumsi energi untuk unit aktif dalam building.
 - Auth: Protected (`ROLE_ADMIN`, `ROLE_BUILDING_MANAGER` dengan scope building cocok).
+- Catatan:
+  - source utama query adalah `energy_readings.building_id`
+  - untuk data lama yang belum punya `building_id`, backend masih fallback ke relasi `building_units.unit_id`
 - Query:
   - `window`: `hourly` atau `daily` (default `hourly`)
   - `hours`: jumlah jam lookback (default `24`)
@@ -686,6 +689,9 @@ Response `200`:
 #### `GET /buildings/{building_id}/reports/export?format=csv&period_start=...&period_end=...`
 - Tujuan: export report building ke file CSV.
 - Auth: Protected (`ROLE_ADMIN`, `ROLE_BUILDING_MANAGER` sesuai scope).
+- Catatan:
+  - source utama query adalah `energy_readings.building_id`
+  - untuk data lama yang belum punya `building_id`, backend masih fallback ke relasi `building_units.unit_id`
 
 Response `200`:
 - Content-Type: `text/csv`
