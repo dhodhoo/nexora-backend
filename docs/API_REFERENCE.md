@@ -1114,6 +1114,53 @@ Response `200`:
 }
 ```
 
+#### `GET /units/{unit_id}/reports/history?community_id={community_id}&limit=12&offset=0`
+- Tujuan: histori laporan bulanan per unit (multi-bulan).
+- Auth: Protected (scope check community + unit).
+- Query:
+  - `community_id` wajib
+  - `limit` opsional (default `12`, max `60`)
+  - `offset` opsional (default `0`)
+
+Response `200`:
+```json
+{
+  "items": [
+    {
+      "period": "2026-03",
+      "total_kwh": 111.2,
+      "estimated_cost": 160572.8,
+      "estimated_emission_kg_co2e": 96.7,
+      "last_timestamp": "2026-03-31T23:00:00",
+      "is_fresh": false
+    }
+  ],
+  "meta": {
+    "total": 3,
+    "offset": 0,
+    "limit": 12,
+    "has_next": false,
+    "unread_count": null
+  }
+}
+```
+
+#### `GET /units/{unit_id}/reports/export?community_id={community_id}&format=pdf|xlsx|csv&period=YYYY-MM`
+- Tujuan: unduh laporan unit per periode bulan.
+- Auth: Protected (scope check community + unit).
+- Query:
+  - `community_id` wajib
+  - `format` wajib (`pdf`, `xlsx`, `csv`)
+  - `period` wajib format `YYYY-MM` (contoh: `2026-03`)
+- Catatan:
+  - saat data periode kosong, backend tetap mengembalikan file valid dengan nilai 0.
+  - `format`/`period` invalid -> `400`.
+
+Response `200`:
+- `format=csv` -> `Content-Type: text/csv`, attachment `unit_U01_report_2026-03.csv`
+- `format=xlsx` -> `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, attachment `unit_U01_report_2026-03.xlsx`
+- `format=pdf` -> `Content-Type: application/pdf`, attachment `unit_U01_report_2026-03.pdf`
+
 #### `GET /communities/{community_id}/units-summary`
 - Tujuan: ringkasan semua unit (quick FE).
 - Auth: Protected (scope check community).

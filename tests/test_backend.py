@@ -347,6 +347,112 @@ def test_unit_daily_emissions_endpoint():
         assert body["total_emission_kg_co2e"] > 0
 
 
+def test_unit_reports_history_multi_month_contract():
+    db = SessionLocal()
+    community = db.query(Community).filter(Community.community_id == "CRH").first()
+    if not community:
+        db.add(Community(community_id="CRH", name="Community Report History"))
+    unit = db.query(Unit).filter(Unit.community_id == "CRH", Unit.unit_id == "URH").first()
+    if not unit:
+        db.add(Unit(community_id="CRH", unit_id="URH", va=1300))
+    db.commit()
+
+    payloads = [
+        {"ts": datetime(2026, 1, 15, 9, 0, tzinfo=timezone.utc), "kwh": 3.0},
+        {"ts": datetime(2026, 2, 15, 9, 0, tzinfo=timezone.utc), "kwh": 2.0},
+        {"ts": datetime(2026, 3, 15, 9, 0, tzinfo=timezone.utc), "kwh": 1.0},
+    ]
+    for p in payloads:
+        IngestionService.ingest_event(
+            db,
+            {
+                "community_id": "CRH",
+                "unit_id": "URH",
+                "device_id": "ac",
+                "timestamp": p["ts"].isoformat(),
+                "kwh": p["kwh"],
+                "controllable": True,
+                "schedules": [],
+            },
+            "energy/CRH/URH/consumption",
+        )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.get(
+            "/units/URH/reports/history",
+            params={"community_id": "CRH", "limit": 2, "offset": 0},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert "items" in body and "meta" in body
+        assert body["meta"]["limit"] == 2
+        assert body["meta"]["total"] >= 3
+        assert body["items"][0]["period"] == "2026-03"
+        assert body["items"][1]["period"] == "2026-02"
+        assert "estimated_emission_kg_co2e" in body["items"][0]
+        assert "estimated_cost" in body["items"][0]
+
+
+def test_unit_reports_export_formats():
+    db = SessionLocal()
+    community = db.query(Community).filter(Community.community_id == "CEX").first()
+    if not community:
+        db.add(Community(community_id="CEX", name="Community Export"))
+    unit = db.query(Unit).filter(Unit.community_id == "CEX", Unit.unit_id == "UEX").first()
+    if not unit:
+        db.add(Unit(community_id="CEX", unit_id="UEX", va=1300))
+    db.commit()
+
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CEX",
+            "unit_id": "UEX",
+            "device_id": "lamp",
+            "timestamp": datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc).isoformat(),
+            "kwh": 1.5,
+            "controllable": True,
+            "schedules": [],
+        },
+        "energy/CEX/UEX/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        csv_res = client.get(
+            "/units/UEX/reports/export",
+            params={"community_id": "CEX", "format": "csv", "period": "2026-03"},
+            headers=headers,
+        )
+        assert csv_res.status_code == 200
+        assert csv_res.headers["content-type"].startswith("text/csv")
+        assert "attachment; filename=\"unit_UEX_report_2026-03.csv\"" in csv_res.headers["content-disposition"]
+
+        xlsx_res = client.get(
+            "/units/UEX/reports/export",
+            params={"community_id": "CEX", "format": "xlsx", "period": "2026-03"},
+            headers=headers,
+        )
+        assert xlsx_res.status_code == 200
+        assert xlsx_res.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert xlsx_res.content[:2] == b"PK"
+
+        pdf_res = client.get(
+            "/units/UEX/reports/export",
+            params={"community_id": "CEX", "format": "pdf", "period": "2026-03"},
+            headers=headers,
+        )
+        assert pdf_res.status_code == 200
+        assert pdf_res.headers["content-type"].startswith("application/pdf")
+        assert pdf_res.content[:4] == b"%PDF"
+
+
 def test_ai_health_and_run_now_success():
     ai_orchestrator.client.health = lambda: {"status": "ok"}
     ai_orchestrator.client.analyze = lambda payload: {

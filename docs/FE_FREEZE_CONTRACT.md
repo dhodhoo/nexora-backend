@@ -67,9 +67,12 @@ Catatan bootstrap auth:
   - `GET /notifications/{notification_id}`
   - `POST /notifications/{notification_id}/mark-read`
   - `POST /notifications/mark-all-read`
-- CSV export:
+- Export laporan:
   - `GET /communities/{community_id}/reports/export?format=csv`
   - `GET /buildings/{building_id}/reports/export?format=csv`
+  - `GET /units/{unit_id}/reports/export?community_id=...&format=pdf|xlsx|csv&period=YYYY-MM`
+- Riwayat laporan unit:
+  - `GET /units/{unit_id}/reports/history?community_id=...&limit=12&offset=0`
 
 ### D. Ops & Debug (Admin)
 - `GET /health`
@@ -119,6 +122,18 @@ Field wajib:
 - `series[].date`
 - `series[].estimated_emission_kg_co2e`
 - `total_emission_kg_co2e`
+
+### `/units/{unit_id}/reports/history`
+Field wajib:
+- `items[]`
+- `items[].period` (`YYYY-MM`)
+- `items[].total_kwh`
+- `items[].estimated_cost`
+- `items[].estimated_emission_kg_co2e`
+- `meta.total`
+- `meta.offset`
+- `meta.limit`
+- `meta.has_next`
 
 ### Notifications List
 Field wajib:

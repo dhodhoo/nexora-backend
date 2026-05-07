@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import csv
 import io
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -74,6 +75,8 @@ from app.schemas import (
     UnitDashboardResponse,
     UnitDailyEmissionPoint,
     UnitDailyEmissionsResponse,
+    UnitReportHistoryItem,
+    UnitReportHistoryResponse,
     UnitDeviceResponse,
     UnitDevicesListResponse,
     UnitDeviceUpdateRequest,
@@ -102,6 +105,14 @@ from app.services.ingestion import QueryService
 from app.services.rate_limit import broadcast_rate_limiter
 from app.services.realtime_ws import dashboard_ws_manager
 from app.services.recommendation_compliance import compute_recommendation_compliance
+from app.services.unit_reports import (
+    build_unit_report_csv,
+    build_unit_report_pdf,
+    build_unit_report_xlsx,
+    compute_unit_period_report,
+    list_unit_report_history,
+    parse_period_yyyy_mm,
+)
 from app.utils.time import assume_utc, utc_now
 
 router = APIRouter()
@@ -336,6 +347,12 @@ def _parse_period(period_start: str | None, period_end: str | None):
     start_dt = assume_utc(datetime.fromisoformat(period_start)) if period_start else None
     end_dt = assume_utc(datetime.fromisoformat(period_end)) if period_end else None
     return start_dt, end_dt
+
+
+def _validate_period_yyyy_mm(period: str) -> str:
+    if not re.match(r"^\d{4}-\d{2}$", period):
+        raise HTTPException(status_code=400, detail="period must use YYYY-MM format")
+    return period
 
 
 def _build_csv_export(unit_rows: list[dict], total_kwh: float, total_cost: float) -> str:
@@ -1605,6 +1622,91 @@ def unit_daily_emissions(
         total_emission_kg_co2e=float(total_emission),
         last_timestamp=last_timestamp,
         is_fresh=QueryService.freshness(last_timestamp),
+    )
+
+
+@router.get("/units/{unit_id}/reports/history", response_model=UnitReportHistoryResponse)
+def unit_reports_history(
+    unit_id: str,
+    community_id: str,
+    offset: int = 0,
+    limit: int = 12,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit must be >= 1")
+    limit = min(limit, 60)
+    _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    include_simulation = current_user.role == UserRole.ADMIN
+    rows, total = list_unit_report_history(
+        db,
+        community_id=community_id,
+        unit_id=unit_id,
+        include_simulation=include_simulation,
+        offset=offset,
+        limit=limit,
+    )
+    items = [
+        UnitReportHistoryItem(
+            period=r.period,
+            total_kwh=r.total_kwh,
+            estimated_cost=r.estimated_cost,
+            estimated_emission_kg_co2e=r.estimated_emission_kg_co2e,
+            last_timestamp=r.last_timestamp,
+            is_fresh=r.is_fresh,
+        )
+        for r in rows
+    ]
+    return UnitReportHistoryResponse(items=items, meta=_meta(total, offset, limit))
+
+
+@router.get("/units/{unit_id}/reports/export")
+def unit_reports_export(
+    unit_id: str,
+    community_id: str,
+    format: str = "csv",
+    period: str = Query(..., description="YYYY-MM"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    format_value = format.lower()
+    if format_value not in {"csv", "xlsx", "pdf"}:
+        raise HTTPException(status_code=400, detail="format must be one of: csv, xlsx, pdf")
+    period_value = _validate_period_yyyy_mm(period)
+    try:
+        period_start, period_end = parse_period_yyyy_mm(period_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    include_simulation = current_user.role == UserRole.ADMIN
+    report_data = compute_unit_period_report(
+        db,
+        community_id=community_id,
+        unit_id=unit_id,
+        period_start=period_start,
+        period_end=period_end,
+        include_simulation=include_simulation,
+    )
+
+    filename = f"unit_{unit_id}_report_{period_value}.{format_value}"
+    if format_value == "csv":
+        content = build_unit_report_csv(period_value, report_data)
+        media_type = "text/csv"
+    elif format_value == "xlsx":
+        content = build_unit_report_xlsx(period_value, report_data)
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        content = build_unit_report_pdf(period_value, report_data)
+        media_type = "application/pdf"
+
+    return StreamingResponse(
+        iter([content]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

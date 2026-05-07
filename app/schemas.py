@@ -226,6 +226,20 @@ class UnitDailyEmissionsResponse(BaseModel):
     is_fresh: bool
 
 
+class UnitReportHistoryItem(BaseModel):
+    period: str
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
+class UnitReportHistoryResponse(BaseModel):
+    items: List[UnitReportHistoryItem] = Field(default_factory=list)
+    meta: ListMetaResponse
+
+
 class AIRecommendationItem(BaseModel):
     unit_id: Optional[str] = None
     device: Optional[str] = None
