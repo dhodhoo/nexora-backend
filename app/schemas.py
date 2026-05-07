@@ -456,6 +456,7 @@ class BuildingDetailResponse(BaseModel):
     building_id: str
     name: Optional[str] = None
     manager_user_id: Optional[str] = None
+    available_floors: List[int] = Field(default_factory=list)
 
 
 class BuildingsListResponse(BaseModel):
@@ -468,12 +469,14 @@ class BroadcastRequest(BaseModel):
 
 
 class BuildingUnitCreateRequest(BaseModel):
-    unit_id: str = Field(min_length=1, max_length=32)
+    unit_id: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    floor: int = Field(ge=1)
     is_active: bool = True
     metadata_json: Optional[Dict[str, Any]] = None
 
 
 class BuildingUnitUpdateRequest(BaseModel):
+    floor: Optional[int] = Field(default=None, ge=1)
     is_active: Optional[bool] = None
     metadata_json: Optional[Dict[str, Any]] = None
 
@@ -481,6 +484,7 @@ class BuildingUnitUpdateRequest(BaseModel):
 class BuildingUnitResponse(BaseModel):
     building_id: str
     unit_id: str
+    floor: Optional[int] = None
     is_active: bool
     metadata_json: Optional[Dict[str, Any]] = None
     created_at: datetime

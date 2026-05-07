@@ -426,7 +426,8 @@ Response `200`:
 {
   "building_id": "B01",
   "name": "Tower A",
-  "manager_user_id": "mgr-b01"
+  "manager_user_id": "mgr-b01",
+  "available_floors": [1, 2, 3]
 }
 ```
 
@@ -465,7 +466,7 @@ Response `200`:
 #### `GET /buildings/{building_id}/units`
 - Tujuan: list unit dalam building.
 - Auth: Protected (`ROLE_ADMIN`, `ROLE_BUILDING_MANAGER` dengan scope building cocok).
-- Query: `offset`, `limit`, `q`.
+- Query: `offset`, `limit`, `q`, `floor`.
 
 Response `200`:
 ```json
@@ -474,6 +475,7 @@ Response `200`:
     {
       "building_id": "B01",
       "unit_id": "A-01",
+      "floor": 1,
       "is_active": true,
       "metadata_json": {
         "floor": 1
@@ -494,14 +496,15 @@ Response `200`:
 #### `POST /buildings/{building_id}/units`
 - Tujuan: create unit baru di building.
 - Auth: Protected (`ROLE_ADMIN`, `ROLE_BUILDING_MANAGER` dengan scope building cocok).
+- Catatan: `floor` wajib dikirim.
+- Catatan: `unit_id` optional. Jika tidak dikirim, backend akan generate otomatis.
 
 Body:
 ```json
 {
-  "unit_id": "A-01",
+  "floor": 1,
   "is_active": true,
   "metadata_json": {
-    "floor": 1,
     "zone": "north"
   }
 }
@@ -516,9 +519,9 @@ Response `200`: shape `BuildingUnitResponse`.
 Body:
 ```json
 {
+  "floor": 2,
   "is_active": false,
   "metadata_json": {
-    "floor": 1,
     "zone": "north",
     "notes": "temporary inactive"
   }

@@ -44,6 +44,11 @@ Catatan bootstrap auth:
   - `GET /buildings`
   - `GET /buildings/{building_id}`
   - response menyertakan `manager_user_id` (`string | null`)
+- Building units:
+  - `GET /buildings/{building_id}/units?floor=...`
+  - `POST /buildings/{building_id}/units`
+  - `unit_id` create boleh kosong; backend akan generate otomatis
+  - create unit wajib menyertakan `floor`
 - Communities list: `GET /communities`
 - Community members list: `GET /communities/{community_id}/members`
 - Add member: `POST /communities/{community_id}/members`
@@ -109,6 +114,17 @@ Field wajib:
 - `building_id`
 - `name`
 - `manager_user_id`
+
+Tambahan untuk `/buildings/{building_id}`:
+- `available_floors` (`number[]`) dari seluruh unit pada gedung, terurut naik, tanpa duplikat
+
+### `/buildings/{building_id}/units`
+Field wajib item:
+- `building_id`
+- `unit_id`
+- `floor`
+- `is_active`
+- `metadata_json`
 
 ### `/communities/{id}/ai-recommendations`
 Field wajib:

@@ -270,6 +270,69 @@ def test_building_responses_include_manager_user_id():
         assert row["manager_user_id"] == "mgr-building"
 
 
+def test_building_units_require_floor_and_support_floor_filter():
+    db = SessionLocal()
+    if not db.query(Building).filter(Building.building_id == "B-FLR").first():
+        db.add(Building(building_id="B-FLR", name="Tower Floor"))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        missing_floor = client.post(
+            "/buildings/B-FLR/units",
+            json={"unit_id": "UF-01", "is_active": True},
+            headers=headers,
+        )
+        assert missing_floor.status_code == 400
+
+        created_1 = client.post(
+            "/buildings/B-FLR/units",
+            json={"unit_id": "UF-01", "floor": 1, "is_active": True, "metadata_json": {"zone": "north"}},
+            headers=headers,
+        )
+        assert created_1.status_code == 200
+        assert created_1.json()["floor"] == 1
+        assert created_1.json()["metadata_json"]["floor"] == 1
+
+        created_2 = client.post(
+            "/buildings/B-FLR/units",
+            json={"floor": 2, "is_active": True},
+            headers=headers,
+        )
+        assert created_2.status_code == 200
+        assert created_2.json()["unit_id"].startswith("unt-")
+        assert created_2.json()["floor"] == 2
+
+        floor_1 = client.get("/buildings/B-FLR/units", params={"floor": 1}, headers=headers)
+        assert floor_1.status_code == 200
+        rows = floor_1.json()["items"]
+        assert len(rows) == 1
+        assert rows[0]["unit_id"] == "UF-01"
+        assert rows[0]["floor"] == 1
+
+
+def test_building_detail_includes_available_floors():
+    db = SessionLocal()
+    if not db.query(Building).filter(Building.building_id == "B-FLOORS").first():
+        db.add(Building(building_id="B-FLOORS", name="Tower Floors"))
+    if not db.query(BuildingUnit).filter(BuildingUnit.building_id == "B-FLOORS", BuildingUnit.unit_id == "F-01").first():
+        db.add(BuildingUnit(building_id="B-FLOORS", unit_id="F-01", is_active=True, metadata_json={"floor": 3}))
+    if not db.query(BuildingUnit).filter(BuildingUnit.building_id == "B-FLOORS", BuildingUnit.unit_id == "F-02").first():
+        db.add(BuildingUnit(building_id="B-FLOORS", unit_id="F-02", is_active=True, metadata_json={"floor": 1}))
+    if not db.query(BuildingUnit).filter(BuildingUnit.building_id == "B-FLOORS", BuildingUnit.unit_id == "F-03").first():
+        db.add(BuildingUnit(building_id="B-FLOORS", unit_id="F-03", is_active=True, metadata_json={"floor": 3}))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        detail = client.get("/buildings/B-FLOORS", headers=headers)
+        assert detail.status_code == 200
+        assert detail.json()["available_floors"] == [1, 3]
+
+
 def test_ingestion_and_unit_summary():
     db = SessionLocal()
     community = Community(community_id="C01", name="Community 01")

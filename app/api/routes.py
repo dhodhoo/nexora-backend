@@ -135,6 +135,33 @@ def _building_unit_ids(db: Session, building_id: str) -> list[str]:
     return [r[0] for r in rows]
 
 
+def _building_unit_floor(metadata_json: dict | None) -> int | None:
+    if not isinstance(metadata_json, dict):
+        return None
+    floor = metadata_json.get("floor")
+    return floor if isinstance(floor, int) else None
+
+
+def _building_unit_metadata(payload_floor: int | None, metadata_json: dict | None) -> dict:
+    merged = dict(metadata_json or {})
+    if payload_floor is not None:
+        merged["floor"] = payload_floor
+    return merged
+
+
+def _building_available_floors(db: Session, building_id: str) -> list[int]:
+    rows = db.execute(
+        select(BuildingUnit.metadata_json).where(BuildingUnit.building_id == building_id)
+    ).all()
+    floors = {
+        floor
+        for (metadata_json,) in rows
+        for floor in [_building_unit_floor(metadata_json)]
+        if floor is not None
+    }
+    return sorted(floors)
+
+
 def _ensure_community_member_manager_access(community_id: str, user: User) -> None:
     if user.role == UserRole.ADMIN:
         return
@@ -212,6 +239,19 @@ def _generate_unique_building_id(db: Session) -> str:
         if not exists:
             return candidate
     raise HTTPException(status_code=500, detail="Failed to generate unique building_id")
+
+
+def _generate_unique_building_unit_id(db: Session, building_id: str) -> str:
+    for _ in range(10):
+        candidate = AuthService.generate_user_id(prefix="unt")
+        exists = db.execute(
+            select(BuildingUnit.id).where(
+                and_(BuildingUnit.building_id == building_id, BuildingUnit.unit_id == candidate)
+            )
+        ).first()
+        if not exists:
+            return candidate
+    raise HTTPException(status_code=500, detail="Failed to generate unique unit_id")
 
 
 def _building_manager_lookup(db: Session, building_ids: list[str]) -> dict[str, str]:
@@ -690,6 +730,7 @@ def get_building(building_id: str, db: Session = Depends(get_db), current_user: 
         building_id=row.building_id,
         name=row.name,
         manager_user_id=manager_lookup.get(row.building_id),
+        available_floors=_building_available_floors(db, row.building_id),
     )
 
 
@@ -714,6 +755,7 @@ def update_building(
         building_id=row.building_id,
         name=row.name,
         manager_user_id=manager_lookup.get(row.building_id),
+        available_floors=_building_available_floors(db, row.building_id),
     )
 
 
@@ -741,6 +783,7 @@ def list_building_units(
     offset: int = 0,
     limit: int = 20,
     q: str | None = None,
+    floor: int | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -754,12 +797,16 @@ def list_building_units(
         pattern = f"%{q}%"
         stmt = stmt.where(BuildingUnit.unit_id.ilike(pattern))
         count_stmt = count_stmt.where(BuildingUnit.unit_id.ilike(pattern))
+    if floor is not None:
+        stmt = stmt.where(BuildingUnit.metadata_json["floor"].as_integer() == floor)
+        count_stmt = count_stmt.where(BuildingUnit.metadata_json["floor"].as_integer() == floor)
     total = int(db.execute(count_stmt).scalar_one())
     rows = db.execute(stmt.order_by(BuildingUnit.unit_id).offset(offset).limit(limit)).scalars().all()
     items = [
         BuildingUnitResponse(
             building_id=r.building_id,
             unit_id=r.unit_id,
+            floor=_building_unit_floor(r.metadata_json),
             is_active=r.is_active,
             metadata_json=r.metadata_json,
             created_at=r.created_at,
@@ -783,16 +830,17 @@ def create_building_unit(
     building = db.execute(select(Building).where(Building.building_id == building_id)).scalar_one_or_none()
     if not building:
         raise HTTPException(status_code=404, detail="Not found")
+    unit_id = payload.unit_id or _generate_unique_building_unit_id(db, building_id)
     exists = db.execute(
-        select(BuildingUnit).where(and_(BuildingUnit.building_id == building_id, BuildingUnit.unit_id == payload.unit_id))
+        select(BuildingUnit).where(and_(BuildingUnit.building_id == building_id, BuildingUnit.unit_id == unit_id))
     ).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="Building unit already exists")
     row = BuildingUnit(
         building_id=building_id,
-        unit_id=payload.unit_id,
+        unit_id=unit_id,
         is_active=payload.is_active,
-        metadata_json=payload.metadata_json,
+        metadata_json=_building_unit_metadata(payload.floor, payload.metadata_json),
     )
     db.add(row)
     db.commit()
@@ -800,6 +848,7 @@ def create_building_unit(
     return BuildingUnitResponse(
         building_id=row.building_id,
         unit_id=row.unit_id,
+        floor=_building_unit_floor(row.metadata_json),
         is_active=row.is_active,
         metadata_json=row.metadata_json,
         created_at=row.created_at,
@@ -825,13 +874,17 @@ def update_building_unit(
         raise HTTPException(status_code=404, detail="Not found")
     if payload.is_active is not None:
         row.is_active = payload.is_active
-    if payload.metadata_json is not None:
-        row.metadata_json = payload.metadata_json
+    if payload.metadata_json is not None or payload.floor is not None:
+        row.metadata_json = _building_unit_metadata(
+            payload.floor if payload.floor is not None else _building_unit_floor(row.metadata_json),
+            payload.metadata_json if payload.metadata_json is not None else row.metadata_json,
+        )
     db.commit()
     db.refresh(row)
     return BuildingUnitResponse(
         building_id=row.building_id,
         unit_id=row.unit_id,
+        floor=_building_unit_floor(row.metadata_json),
         is_active=row.is_active,
         metadata_json=row.metadata_json,
         created_at=row.created_at,
