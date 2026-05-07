@@ -453,6 +453,177 @@ def test_unit_reports_export_formats():
         assert pdf_res.content[:4] == b"%PDF"
 
 
+def test_community_units_and_residents_detailed_contract():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CDTL").first():
+        db.add(Community(community_id="CDTL", name="Community Detail"))
+    if not db.query(Unit).filter(Unit.community_id == "CDTL", Unit.unit_id == "UD01").first():
+        db.add(Unit(community_id="CDTL", unit_id="UD01", va=1300))
+    if not db.query(User).filter(User.user_id == "resident-dtl").first():
+        db.add(
+            User(
+                user_id="resident-dtl",
+                full_name="Resident Detail",
+                email="resident-dtl@nexora.local",
+                password_hash="hashed",
+                role=UserRole.RESIDENT,
+                status=UserStatus.ACTIVE,
+                community_id="CDTL",
+                unit_id="UD01",
+            )
+        )
+    db.commit()
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CDTL",
+            "unit_id": "UD01",
+            "device_id": "ac",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kwh": 1.1,
+            "controllable": True,
+            "schedules": [],
+        },
+        "energy/CDTL/UD01/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        units_res = client.get("/communities/CDTL/units/detailed", headers=headers)
+        assert units_res.status_code == 200
+        units_body = units_res.json()
+        assert "items" in units_body and "meta" in units_body
+        assert len(units_body["items"]) >= 1
+        assert {"unit_id", "owner", "consumption", "devices_count", "risk", "recommendation", "last_seen", "status"}.issubset(
+            set(units_body["items"][0].keys())
+        )
+
+        residents_res = client.get("/communities/CDTL/residents/detailed", headers=headers)
+        assert residents_res.status_code == 200
+        residents_body = residents_res.json()
+        assert "items" in residents_body and "meta" in residents_body
+        assert len(residents_body["items"]) >= 1
+        assert {"user", "unit", "consumption", "risk", "interaction_metadata"}.issubset(
+            set(residents_body["items"][0].keys())
+        )
+
+
+def test_community_reports_history_and_daily_contract():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CRPT").first():
+        db.add(Community(community_id="CRPT", name="Community Report"))
+    if not db.query(Unit).filter(Unit.community_id == "CRPT", Unit.unit_id == "URPT").first():
+        db.add(Unit(community_id="CRPT", unit_id="URPT", va=1300))
+    db.commit()
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CRPT",
+            "unit_id": "URPT",
+            "device_id": "lamp",
+            "timestamp": datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc).isoformat(),
+            "kwh": 2.5,
+            "controllable": True,
+            "schedules": [],
+        },
+        "energy/CRPT/URPT/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        history_res = client.get("/communities/CRPT/reports/history", headers=headers)
+        assert history_res.status_code == 200
+        history = history_res.json()
+        assert "items" in history and "meta" in history
+        daily_res = client.get("/communities/CRPT/consumption/daily", params={"days": 7}, headers=headers)
+        assert daily_res.status_code == 200
+        daily = daily_res.json()
+        assert {"community_id", "series", "period_used", "period_start", "last_timestamp", "is_fresh"}.issubset(set(daily.keys()))
+
+
+def test_community_settings_notification_preferences_and_optimization():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CSET").first():
+        db.add(Community(community_id="CSET", name="Community Settings"))
+    if not db.query(Unit).filter(Unit.community_id == "CSET", Unit.unit_id == "USET").first():
+        db.add(Unit(community_id="CSET", unit_id="USET", va=1300))
+    db.commit()
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CSET",
+            "unit_id": "USET",
+            "device_id": "ac",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kwh": 1.0,
+            "controllable": True,
+            "schedules": [],
+        },
+        "energy/CSET/USET/consumption",
+    )
+    db.add(
+        AIAnalysisResult(
+            community_id="CSET",
+            status="success",
+            stale=False,
+            source="manual",
+            payload={},
+            result={
+                "result": {
+                    "recommendations": [
+                        {
+                            "unit_id": "USET",
+                            "device": "ac",
+                            "action": "turn_off",
+                            "estimated_reduction_kwh": 1.2,
+                            "saving": 1000,
+                            "co2_reduction": 0.5,
+                            "reasons": ["test"],
+                        }
+                    ]
+                }
+            },
+            error="",
+        )
+    )
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        get_settings = client.get("/communities/CSET/settings", headers=headers)
+        assert get_settings.status_code == 200
+        put_settings = client.put(
+            "/communities/CSET/settings",
+            json={
+                "tariff": 1500,
+                "emission_factor": 0.9,
+                "thresholds": {"high_kwh": 2.0, "critical_kwh": 3.5},
+                "notification_config": {"enabled": True, "daily_digest": False, "realtime_alert": True},
+            },
+            headers=headers,
+        )
+        assert put_settings.status_code == 200
+        assert put_settings.json()["tariff"] == 1500
+
+        prefs_put = client.put(
+            "/users/admin-001/notification-preferences",
+            json={"preferences": {"email": True, "push": False}},
+            headers=headers,
+        )
+        assert prefs_put.status_code == 200
+        prefs_get = client.get("/users/admin-001/notification-preferences", headers=headers)
+        assert prefs_get.status_code == 200
+        assert prefs_get.json()["preferences"]["email"] is True
+
+        sim = client.get("/communities/CSET/optimization-simulation", headers=headers)
+        assert sim.status_code == 200
+        sim_body = sim.json()
+        assert {"community_id", "exists", "summary", "scenarios"}.issubset(set(sim_body.keys()))
+
+
 def test_ai_health_and_run_now_success():
     ai_orchestrator.client.health = lambda: {"status": "ok"}
     ai_orchestrator.client.analyze = lambda payload: {

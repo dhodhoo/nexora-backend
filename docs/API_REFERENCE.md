@@ -1583,6 +1583,40 @@ Response `200`:
 - Content-Type: `text/csv`
 - File attachment: `community_{community_id}_report.csv`
 
+#### `GET /communities/{community_id}/units/detailed`
+- Tujuan: list unit detail FE-ready (owner, consumption, devices_count, risk, recommendation, last_seen, status).
+- Auth: Protected (scope check community).
+- Response `200`: `items + meta`.
+
+#### `GET /communities/{community_id}/residents/detailed`
+- Tujuan: list resident detail FE-ready (user, unit, consumption, risk, interaction_metadata).
+- Auth: Protected (scope check community).
+- Response `200`: `items + meta`.
+
+#### `GET /communities/{community_id}/reports/history`
+- Tujuan: histori laporan komunitas multi-bulan.
+- Auth: Protected (scope check community).
+- Response `200`: `items + meta`.
+
+#### `GET /communities/{community_id}/consumption/daily`
+- Tujuan: time series konsumsi harian komunitas untuk laporan.
+- Auth: Protected (scope check community).
+- Response `200`: object analytics harian.
+
+#### `GET /communities/{community_id}/settings`
+#### `PUT /communities/{community_id}/settings`
+- Tujuan: baca/update settings komunitas (`tariff`, `emission_factor`, `thresholds`, `notification_config`).
+- Auth: Protected (`ROLE_ADMIN`, `ROLE_COORDINATOR` scoped).
+
+#### `GET /users/{user_id}/notification-preferences`
+#### `PUT /users/{user_id}/notification-preferences`
+- Tujuan: baca/update preferensi notifikasi user.
+- Auth: Protected (self atau admin).
+
+#### `GET /communities/{community_id}/optimization-simulation`
+- Tujuan: payload simulasi optimasi berbasis konsumsi + rekomendasi AI terbaru.
+- Auth: Protected (scope check community).
+
 #### `GET /notifications`
 - Tujuan: list notifikasi yang tersimpan (dengan delivery status).
 - Auth: Protected.

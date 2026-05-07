@@ -432,6 +432,151 @@ class UserResponse(BaseModel):
     unit_id: Optional[str] = None
 
 
+class UnitDetailedOwner(BaseModel):
+    user_id: str
+    full_name: str
+
+
+class UnitDetailedConsumption(BaseModel):
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+
+
+class UnitDetailedRisk(BaseModel):
+    peak_kwh: float
+    risk_level: str
+
+
+class UnitDetailedItem(BaseModel):
+    unit_id: str
+    owner: Optional[UnitDetailedOwner] = None
+    consumption: UnitDetailedConsumption
+    devices_count: int
+    risk: UnitDetailedRisk
+    recommendation: Dict[str, Any] = Field(default_factory=dict)
+    last_seen: Optional[datetime] = None
+    status: str
+
+
+class CommunityUnitsDetailedResponse(BaseModel):
+    items: List[UnitDetailedItem] = Field(default_factory=list)
+    meta: ListMetaResponse
+
+
+class ResidentInteractionMetadata(BaseModel):
+    command_count: int = 0
+    notification_read_count: int = 0
+    notification_count: int = 0
+    last_interaction_at: Optional[datetime] = None
+
+
+class ResidentDetailedUser(BaseModel):
+    user_id: str
+    full_name: str
+    role: str
+    status: str
+
+
+class ResidentDetailedUnit(BaseModel):
+    unit_id: Optional[str] = None
+
+
+class ResidentDetailedItem(BaseModel):
+    user: ResidentDetailedUser
+    unit: ResidentDetailedUnit
+    consumption: UnitDetailedConsumption
+    risk: UnitDetailedRisk
+    interaction_metadata: ResidentInteractionMetadata
+
+
+class CommunityResidentsDetailedResponse(BaseModel):
+    items: List[ResidentDetailedItem] = Field(default_factory=list)
+    meta: ListMetaResponse
+
+
+class CommunityReportHistoryItem(BaseModel):
+    period: str
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
+class CommunityReportHistoryResponse(BaseModel):
+    items: List[CommunityReportHistoryItem] = Field(default_factory=list)
+    meta: ListMetaResponse
+
+
+class CommunityDailyConsumptionPoint(BaseModel):
+    date: str
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+
+
+class CommunityDailyConsumptionResponse(BaseModel):
+    community_id: str
+    series: List[CommunityDailyConsumptionPoint] = Field(default_factory=list)
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    last_timestamp: Optional[datetime] = None
+    is_fresh: bool = False
+
+
+class CommunitySettingsThresholds(BaseModel):
+    high_kwh: float = 1.5
+    critical_kwh: float = 3.0
+
+
+class CommunitySettingsNotificationConfig(BaseModel):
+    enabled: bool = True
+    daily_digest: bool = True
+    realtime_alert: bool = True
+
+
+class CommunitySettingsResponse(BaseModel):
+    community_id: str
+    tariff: float
+    emission_factor: float
+    thresholds: CommunitySettingsThresholds
+    notification_config: CommunitySettingsNotificationConfig
+    updated_at: Optional[datetime] = None
+
+
+class CommunitySettingsUpdateRequest(BaseModel):
+    tariff: Optional[float] = Field(default=None, gt=0)
+    emission_factor: Optional[float] = Field(default=None, gt=0)
+    thresholds: Optional[CommunitySettingsThresholds] = None
+    notification_config: Optional[CommunitySettingsNotificationConfig] = None
+
+
+class UserNotificationPreferencesResponse(BaseModel):
+    user_id: str
+    preferences: Dict[str, Any] = Field(default_factory=dict)
+    updated_at: Optional[datetime] = None
+
+
+class UserNotificationPreferencesUpdateRequest(BaseModel):
+    preferences: Dict[str, Any] = Field(default_factory=dict)
+
+
+class OptimizationSimulationSummary(BaseModel):
+    current_kwh: float = 0.0
+    potential_reduction_kwh: float = 0.0
+    potential_cost_saving: float = 0.0
+    potential_emission_reduction_kg_co2e: float = 0.0
+
+
+class OptimizationSimulationResponse(BaseModel):
+    community_id: str
+    exists: bool
+    analyzed_at: Optional[datetime] = None
+    summary: OptimizationSimulationSummary = Field(default_factory=OptimizationSimulationSummary)
+    scenarios: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class UsersListResponse(BaseModel):
     items: List[UserResponse]
     meta: ListMetaResponse

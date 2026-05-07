@@ -32,6 +32,13 @@ Catatan bootstrap auth:
 7. `WS /ws/communities/{community_id}/dashboard`
 8. `GET /communities/{community_id}/units/{unit_id}/dashboard`
 9. `WS /ws/communities/{community_id}/units/{unit_id}/dashboard`
+10. `GET /communities/{community_id}/units/detailed`
+11. `GET /communities/{community_id}/residents/detailed`
+12. `GET /communities/{community_id}/reports/history`
+13. `GET /communities/{community_id}/consumption/daily`
+14. `GET /communities/{community_id}/settings`
+15. `PUT /communities/{community_id}/settings`
+16. `GET /communities/{community_id}/optimization-simulation`
 - Untuk analytics periodik, endpoint dashboard/summary mendukung query `period=all|month|week` (default `all`).
 - Untuk `period=month|week`, response juga menyertakan blok `comparison` (persen konsumsi/tagihan/emisi vs periode sebelumnya). Jika periode sebelumnya nol, nilai persen akan `null`.
 - Semua endpoint analytics utama juga menyertakan blok `recommendation_compliance`:
@@ -73,6 +80,9 @@ Catatan bootstrap auth:
   - `GET /units/{unit_id}/reports/export?community_id=...&format=pdf|xlsx|csv&period=YYYY-MM`
 - Riwayat laporan unit:
   - `GET /units/{unit_id}/reports/history?community_id=...&limit=12&offset=0`
+- Preferences notifikasi user:
+  - `GET /users/{user_id}/notification-preferences`
+  - `PUT /users/{user_id}/notification-preferences`
 
 ### D. Ops & Debug (Admin)
 - `GET /health`
