@@ -80,6 +80,20 @@ def resolve_period(period: str | None) -> tuple[str, datetime | None, datetime |
     return value, None, None
 
 
+def resolve_load_curve_start(period_start: datetime | None, days: int = 7) -> datetime:
+    lower_bound = utc_now() - timedelta(days=max(1, days))
+    if period_start is None:
+        return lower_bound
+    return period_start if period_start > lower_bound else lower_bound
+
+
+def resolve_load_curve_end(period_end: datetime | None) -> datetime:
+    now = utc_now()
+    if period_end is None:
+        return now
+    return period_end if period_end < now else now
+
+
 def build_units_summary(
     db: Session,
     community_id: str,
@@ -183,10 +197,10 @@ def build_load_curve(
 ) -> list[dict[str, Any]]:
     bucket_expr = func.to_char(func.date_trunc("hour", EnergyReading.timestamp), "YYYY-MM-DD\"T\"HH24:00:00")
     conditions = [EnergyReading.community_id == community_id]
-    if period_start:
-        conditions.append(EnergyReading.timestamp >= period_start.replace(tzinfo=None))
-    if period_end:
-        conditions.append(EnergyReading.timestamp <= period_end.replace(tzinfo=None))
+    effective_start = resolve_load_curve_start(period_start)
+    effective_end = resolve_load_curve_end(period_end)
+    conditions.append(EnergyReading.timestamp >= effective_start.replace(tzinfo=None))
+    conditions.append(EnergyReading.timestamp <= effective_end.replace(tzinfo=None))
     if not include_simulation:
         conditions.append(EnergyReading.is_simulation.is_(False))
     rows = db.execute(
@@ -467,12 +481,19 @@ def build_unit_dashboard_snapshot(
     )
 
     bucket_expr = func.to_char(func.date_trunc("hour", EnergyReading.timestamp), "YYYY-MM-DD\"T\"HH24:00:00")
+    load_curve_conditions = [EnergyReading.community_id == community_id, EnergyReading.unit_id == unit_id]
+    effective_load_start = resolve_load_curve_start(period_start)
+    effective_load_end = resolve_load_curve_end(period_end)
+    load_curve_conditions.append(EnergyReading.timestamp >= effective_load_start.replace(tzinfo=None))
+    load_curve_conditions.append(EnergyReading.timestamp <= effective_load_end.replace(tzinfo=None))
+    if not include_simulation:
+        load_curve_conditions.append(EnergyReading.is_simulation.is_(False))
     rows = db.execute(
         select(
             bucket_expr.label("bucket"),
             func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
         )
-        .where(and_(*conditions))
+        .where(and_(*load_curve_conditions))
         .group_by(bucket_expr)
         .order_by(bucket_expr)
     ).all()

@@ -2245,3 +2245,65 @@ def test_recommendation_compliance_command_matched():
         assert "recommendation_compliance" in dbody["community"]
         assert dbody["comparison"] is not None
         assert "compliance_pct_point_delta" in dbody["comparison"]
+
+
+def test_load_curve_is_limited_to_last_7_days_for_dashboard_and_unit():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CLC7").first():
+        db.add(Community(community_id="CLC7", name="Community LC7"))
+    if not db.query(Unit).filter(Unit.community_id == "CLC7", Unit.unit_id == "ULC7").first():
+        db.add(Unit(community_id="CLC7", unit_id="ULC7", va=2200))
+    db.commit()
+
+    old_ts = utc_now() - timedelta(days=9)
+    recent_ts = utc_now() - timedelta(days=1)
+
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CLC7",
+            "unit_id": "ULC7",
+            "device_id": "ac",
+            "timestamp": old_ts.isoformat(),
+            "kwh": 1.1,
+            "controllable": True,
+        },
+        "energy/CLC7/ULC7/consumption",
+    )
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CLC7",
+            "unit_id": "ULC7",
+            "device_id": "ac",
+            "timestamp": recent_ts.isoformat(),
+            "kwh": 2.2,
+            "controllable": True,
+        },
+        "energy/CLC7/ULC7/consumption",
+    )
+    db.close()
+
+    old_bucket = old_ts.strftime("%Y-%m-%dT%H:00:00")
+    recent_bucket = recent_ts.strftime("%Y-%m-%dT%H:00:00")
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        community_dash = client.get("/communities/CLC7/dashboard", params={"period": "all"}, headers=headers)
+        assert community_dash.status_code == 200
+        c_buckets = {p["bucket"] for p in community_dash.json()["load_curve"]}
+        assert old_bucket not in c_buckets
+        assert recent_bucket in c_buckets
+
+        community_curve = client.get("/communities/CLC7/load-curve", params={"period": "all"}, headers=headers)
+        assert community_curve.status_code == 200
+        curve_buckets = {p["bucket"] for p in community_curve.json()}
+        assert old_bucket not in curve_buckets
+        assert recent_bucket in curve_buckets
+
+        unit_dash = client.get("/communities/CLC7/units/ULC7/dashboard", params={"period": "all"}, headers=headers)
+        assert unit_dash.status_code == 200
+        u_buckets = {p["bucket"] for p in unit_dash.json()["load_curve"]}
+        assert old_bucket not in u_buckets
+        assert recent_bucket in u_buckets

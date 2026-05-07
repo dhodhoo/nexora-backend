@@ -1036,6 +1036,7 @@ Response `200`:
 
 Catatan umum analytics:
 - Query `period` didukung: `all|month|week` (default `all`).
+- `load_curve` dibatasi ke data maksimal 7 hari terakhir (UTC) untuk menjaga performa endpoint.
 - Blok `recommendation_compliance` tersedia di response summary/dashboard:
   - `total_recommendations`
   - `followed_recommendations`
@@ -1205,6 +1206,7 @@ Response `200`:
 - Tujuan: payload dashboard tunggal.
 - Auth: Protected (scope check community).
 - Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
+- Catatan performa: field `load_curve` hanya memuat bucket 7 hari terakhir.
 
 Response `200`:
 ```json
@@ -1279,6 +1281,7 @@ Response `200`:
 - Tujuan: payload dashboard fokus 1 unit.
 - Auth: Protected (scope community + unit access).
 - Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
+- Catatan performa: field `load_curve` hanya memuat bucket 7 hari terakhir.
 
 Response `200`:
 ```json
@@ -1331,6 +1334,7 @@ Response `200`:
 - Tujuan: kurva beban per jam.
 - Auth: Protected (scope check community).
 - Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
+- Catatan performa: hasil kurva dibatasi ke bucket 7 hari terakhir.
 
 Response `200`:
 ```json
