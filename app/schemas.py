@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DeviceSchedule(BaseModel):
@@ -27,12 +27,20 @@ class RecommendationCompliance(BaseModel):
     window_hours: int = 24
 
 
+class DeviceEmissionItem(BaseModel):
+    device_id: str
+    device_name: str
+    total_kwh: float
+    estimated_emission_kg_co2e: float
+
+
 class UnitSummaryResponse(BaseModel):
     community_id: str
     unit_id: str
     total_kwh: float
     estimated_cost: float
     estimated_emission_kg_co2e: float
+    device_emissions: List[DeviceEmissionItem] = Field(default_factory=list)
     last_timestamp: Optional[datetime]
     is_fresh: bool
     period_used: str = "all"
@@ -199,6 +207,37 @@ class UnitDashboardResponse(BaseModel):
     comparison: Optional[PeriodComparison] = None
     recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
     generated_at: datetime
+
+
+class UnitDailyEmissionPoint(BaseModel):
+    date: str
+    total_kwh: float
+    estimated_emission_kg_co2e: float
+
+
+class UnitDailyEmissionsResponse(BaseModel):
+    community_id: str
+    unit_id: str
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    series: List[UnitDailyEmissionPoint] = Field(default_factory=list)
+    total_emission_kg_co2e: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
+class UnitReportHistoryItem(BaseModel):
+    period: str
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
+class UnitReportHistoryResponse(BaseModel):
+    items: List[UnitReportHistoryItem] = Field(default_factory=list)
+    meta: ListMetaResponse
 
 
 class AIRecommendationItem(BaseModel):
@@ -391,6 +430,151 @@ class UserResponse(BaseModel):
     community_id: Optional[str] = None
     building_id: Optional[str] = None
     unit_id: Optional[str] = None
+
+
+class UnitDetailedOwner(BaseModel):
+    user_id: str
+    full_name: str
+
+
+class UnitDetailedConsumption(BaseModel):
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+
+
+class UnitDetailedRisk(BaseModel):
+    peak_kwh: float
+    risk_level: str
+
+
+class UnitDetailedItem(BaseModel):
+    unit_id: str
+    owner: Optional[UnitDetailedOwner] = None
+    consumption: UnitDetailedConsumption
+    devices_count: int
+    risk: UnitDetailedRisk
+    recommendation: Dict[str, Any] = Field(default_factory=dict)
+    last_seen: Optional[datetime] = None
+    status: str
+
+
+class CommunityUnitsDetailedResponse(BaseModel):
+    items: List[UnitDetailedItem] = Field(default_factory=list)
+    meta: ListMetaResponse
+
+
+class ResidentInteractionMetadata(BaseModel):
+    command_count: int = 0
+    notification_read_count: int = 0
+    notification_count: int = 0
+    last_interaction_at: Optional[datetime] = None
+
+
+class ResidentDetailedUser(BaseModel):
+    user_id: str
+    full_name: str
+    role: str
+    status: str
+
+
+class ResidentDetailedUnit(BaseModel):
+    unit_id: Optional[str] = None
+
+
+class ResidentDetailedItem(BaseModel):
+    user: ResidentDetailedUser
+    unit: ResidentDetailedUnit
+    consumption: UnitDetailedConsumption
+    risk: UnitDetailedRisk
+    interaction_metadata: ResidentInteractionMetadata
+
+
+class CommunityResidentsDetailedResponse(BaseModel):
+    items: List[ResidentDetailedItem] = Field(default_factory=list)
+    meta: ListMetaResponse
+
+
+class CommunityReportHistoryItem(BaseModel):
+    period: str
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
+class CommunityReportHistoryResponse(BaseModel):
+    items: List[CommunityReportHistoryItem] = Field(default_factory=list)
+    meta: ListMetaResponse
+
+
+class CommunityDailyConsumptionPoint(BaseModel):
+    date: str
+    total_kwh: float
+    estimated_cost: float
+    estimated_emission_kg_co2e: float
+
+
+class CommunityDailyConsumptionResponse(BaseModel):
+    community_id: str
+    series: List[CommunityDailyConsumptionPoint] = Field(default_factory=list)
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    last_timestamp: Optional[datetime] = None
+    is_fresh: bool = False
+
+
+class CommunitySettingsThresholds(BaseModel):
+    high_kwh: float = 1.5
+    critical_kwh: float = 3.0
+
+
+class CommunitySettingsNotificationConfig(BaseModel):
+    enabled: bool = True
+    daily_digest: bool = True
+    realtime_alert: bool = True
+
+
+class CommunitySettingsResponse(BaseModel):
+    community_id: str
+    tariff: float
+    emission_factor: float
+    thresholds: CommunitySettingsThresholds
+    notification_config: CommunitySettingsNotificationConfig
+    updated_at: Optional[datetime] = None
+
+
+class CommunitySettingsUpdateRequest(BaseModel):
+    tariff: Optional[float] = Field(default=None, gt=0)
+    emission_factor: Optional[float] = Field(default=None, gt=0)
+    thresholds: Optional[CommunitySettingsThresholds] = None
+    notification_config: Optional[CommunitySettingsNotificationConfig] = None
+
+
+class UserNotificationPreferencesResponse(BaseModel):
+    user_id: str
+    preferences: Dict[str, Any] = Field(default_factory=dict)
+    updated_at: Optional[datetime] = None
+
+
+class UserNotificationPreferencesUpdateRequest(BaseModel):
+    preferences: Dict[str, Any] = Field(default_factory=dict)
+
+
+class OptimizationSimulationSummary(BaseModel):
+    current_kwh: float = 0.0
+    potential_reduction_kwh: float = 0.0
+    potential_cost_saving: float = 0.0
+    potential_emission_reduction_kg_co2e: float = 0.0
+
+
+class OptimizationSimulationResponse(BaseModel):
+    community_id: str
+    exists: bool
+    analyzed_at: Optional[datetime] = None
+    summary: OptimizationSimulationSummary = Field(default_factory=OptimizationSimulationSummary)
+    scenarios: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class UsersListResponse(BaseModel):
@@ -624,12 +808,16 @@ class DeviceCatalogListResponse(BaseModel):
 class UnitDeviceCreateRequest(BaseModel):
     device_id: str = Field(min_length=1, max_length=64)
     qty: int = Field(default=1, ge=1)
+    is_active: bool = True
     controllable: bool = True
     schedules: Optional[List[Dict[str, Any]]] = None
 
 
 class UnitDeviceUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     qty: Optional[int] = Field(default=None, ge=1)
+    is_active: Optional[bool] = None
     controllable: Optional[bool] = None
     schedules: Optional[List[Dict[str, Any]]] = None
 
@@ -638,6 +826,8 @@ class UnitDeviceResponse(BaseModel):
     device_id: str
     device_name: str
     qty: int
+    is_active: bool
+    schedule_source: str = "mqtt"
     controllable: bool
     schedules: Optional[List[Dict[str, Any]]] = None
 

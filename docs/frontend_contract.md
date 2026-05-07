@@ -1,6 +1,7 @@
 # Frontend Contract Mapping (Backend-First)
 
 Dokumen ini adalah mapping cepat endpoint backend untuk dashboard FE Nexora.
+Referensi endpoint + contoh payload/response resmi: [API_REFERENCE.md](/D:/nexora/nexora-backend/docs/API_REFERENCE.md).
 
 ## Target Flow FE
 

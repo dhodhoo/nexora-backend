@@ -7,6 +7,7 @@ Dokumen ini adalah referensi utama endpoint backend Nexora untuk tim Backend, Fr
 - Base URL lokal: `http://127.0.0.1:8100`
 - Format body request: `application/json`
 - Format response: `application/json`
+- Source of truth endpoint + contoh payload/response: dokumen ini (`API_REFERENCE.md`).
 - Auth:
   - Public endpoint: `/health`, `/auth/login`, `/auth/refresh`
   - Endpoint lain: wajib `Authorization: Bearer <access_token>`
@@ -1049,6 +1050,20 @@ Response `200`:
   "total_kwh": 12.34,
   "estimated_cost": 17819.0,
   "estimated_emission_kg_co2e": 10.489,
+  "device_emissions": [
+    {
+      "device_id": "ac",
+      "device_name": "Air Conditioner",
+      "total_kwh": 6.2,
+      "estimated_emission_kg_co2e": 5.27
+    },
+    {
+      "device_id": "lamp",
+      "device_name": "lamp",
+      "total_kwh": 2.1,
+      "estimated_emission_kg_co2e": 1.79
+    }
+  ],
   "last_timestamp": "2026-05-05T10:00:00",
   "is_fresh": true,
   "period_used": "month",
@@ -1069,6 +1084,86 @@ Response `200`:
   }
 }
 ```
+- Catatan: `device_name` diambil dari catalog global device, fallback ke `device_id` jika tidak ditemukan.
+
+#### `GET /units/{unit_id}/emissions/daily?community_id={community_id}`
+- Tujuan: data emisi harian per unit untuk grafik laporan.
+- Auth: Protected (scope check community + unit).
+- Query:
+  - `days` opsional, default `30`, range `1..365`.
+  - `period=all|month|week` opsional, default `all`.
+
+Response `200`:
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "period_used": "month",
+  "period_start": "2026-05-01T00:00:00+00:00",
+  "series": [
+    {
+      "date": "2026-05-01",
+      "total_kwh": 8.2,
+      "estimated_emission_kg_co2e": 6.97
+    },
+    {
+      "date": "2026-05-02",
+      "total_kwh": 7.9,
+      "estimated_emission_kg_co2e": 6.72
+    }
+  ],
+  "total_emission_kg_co2e": 13.69,
+  "last_timestamp": "2026-05-02T21:00:00",
+  "is_fresh": true
+}
+```
+
+#### `GET /units/{unit_id}/reports/history?community_id={community_id}&limit=12&offset=0`
+- Tujuan: histori laporan bulanan per unit (multi-bulan).
+- Auth: Protected (scope check community + unit).
+- Query:
+  - `community_id` wajib
+  - `limit` opsional (default `12`, max `60`)
+  - `offset` opsional (default `0`)
+
+Response `200`:
+```json
+{
+  "items": [
+    {
+      "period": "2026-03",
+      "total_kwh": 111.2,
+      "estimated_cost": 160572.8,
+      "estimated_emission_kg_co2e": 96.7,
+      "last_timestamp": "2026-03-31T23:00:00",
+      "is_fresh": false
+    }
+  ],
+  "meta": {
+    "total": 3,
+    "offset": 0,
+    "limit": 12,
+    "has_next": false,
+    "unread_count": null
+  }
+}
+```
+
+#### `GET /units/{unit_id}/reports/export?community_id={community_id}&format=pdf|xlsx|csv&period=YYYY-MM`
+- Tujuan: unduh laporan unit per periode bulan.
+- Auth: Protected (scope check community + unit).
+- Query:
+  - `community_id` wajib
+  - `format` wajib (`pdf`, `xlsx`, `csv`)
+  - `period` wajib format `YYYY-MM` (contoh: `2026-03`)
+- Catatan:
+  - saat data periode kosong, backend tetap mengembalikan file valid dengan nilai 0.
+  - `format`/`period` invalid -> `400`.
+
+Response `200`:
+- `format=csv` -> `Content-Type: text/csv`, attachment `unit_U01_report_2026-03.csv`
+- `format=xlsx` -> `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, attachment `unit_U01_report_2026-03.xlsx`
+- `format=pdf` -> `Content-Type: application/pdf`, attachment `unit_U01_report_2026-03.pdf`
 
 #### `GET /communities/{community_id}/units-summary`
 - Tujuan: ringkasan semua unit (quick FE).
@@ -1279,7 +1374,9 @@ Response `200`:
 - Tujuan: list device per unit.
 - Auth: Protected (scope role-based per unit).
 - Catatan: setiap item sekarang punya field `qty` (jumlah perangkat sejenis dalam unit).
+- Catatan: setiap item punya field `is_active` untuk status operasional device di unit.
 - Catatan: `device_name` diambil dari `device_catalog.display_name`; fallback ke `device_id` jika belum terdaftar di catalog.
+- Catatan: `schedule_source` menunjukkan sumber schedule aktif (`manual` dari API atau `mqtt` dari ingestion).
 
 Response `200`:
 ```json
@@ -1289,6 +1386,8 @@ Response `200`:
       "device_id": "ac",
       "device_name": "Air Conditioner",
       "qty": 2,
+      "is_active": true,
+      "schedule_source": "manual",
       "controllable": true,
       "schedules": [
         {
@@ -1311,13 +1410,14 @@ Response `200`:
 - Tujuan: tambah device ke unit.
 - Auth: Protected (admin/coordinator/building_manager/resident pada scope unit yang diizinkan).
 - Body menerima `qty` (opsional, default `1`, minimal `1`).
+- Body menerima `is_active` (opsional, default `true`).
 
 Body:
 ```json
 {
   "device_id": "ac-main",
-  "device_name": "AC Main",
   "qty": 2,
+  "is_active": true,
   "controllable": true,
   "schedules": [
     {
@@ -1331,7 +1431,10 @@ Response `200`:
 ```json
 {
   "device_id": "ac-main",
+  "device_name": "Air Conditioner",
   "qty": 2,
+  "is_active": true,
+  "schedule_source": "manual",
   "controllable": true,
   "schedules": [
     {
@@ -1344,12 +1447,18 @@ Response `200`:
 #### `PUT /units/{unit_id}/devices/{device_id}?community_id={community_id}`
 - Tujuan: update metadata device unit.
 - Auth: Protected (scope role-based).
-- Dapat update `qty` (`>=1`) selain metadata lain.
+- Dapat update `qty` (`>=1`), `is_active`, selain metadata lain.
+- Gunakan field `schedules` (plural). Field tidak dikenal seperti `schedule` akan ditolak `400`.
+- Source-of-truth schedules:
+  - nilai `schedules` dari endpoint PUT/POST dipertahankan jika event MQTT berikutnya **tidak** menyertakan field `schedules`.
+  - nilai `schedules` juga dipertahankan jika MQTT mengirim `schedules: null`.
+  - overwrite dari MQTT hanya terjadi jika payload MQTT mengirim field `schedules` secara eksplisit.
 
 Body:
 ```json
 {
   "qty": 3,
+  "is_active": false,
   "controllable": true,
   "schedules": [
     {
@@ -1365,6 +1474,8 @@ Response `200`:
   "device_id": "ac-main",
   "device_name": "AC Main",
   "qty": 3,
+  "is_active": false,
+  "schedule_source": "manual",
   "controllable": true,
   "schedules": [
     {
@@ -1373,6 +1484,16 @@ Response `200`:
   ]
 }
 ```
+
+Contoh error `400` (body kosong / no-op):
+```json
+{
+  "detail": "No updatable fields provided"
+}
+```
+
+Troubleshooting singkat:
+- Jika FE melihat `schedules` kembali `null`, pastikan sumber event MQTT untuk device tersebut mengirim field `schedules` sesuai kontrak jika memang ingin override.
 
 #### `DELETE /units/{unit_id}/devices/{device_id}?community_id={community_id}`
 - Tujuan: hapus device dari unit.
@@ -1392,6 +1513,7 @@ Response `200`:
 - Tujuan: kontrol device nyata (`action=on|off`) dan publish command ke MQTT.
 - Auth: Protected (scope role-based).
 - Untuk `qty > 1`, command berlaku ke seluruh instance device tersebut.
+- Jika `is_active=false`, request control ditolak (`400 Device is inactive`).
 
 Body:
 ```json
@@ -1464,6 +1586,40 @@ Response `200`:
 Response `200`:
 - Content-Type: `text/csv`
 - File attachment: `community_{community_id}_report.csv`
+
+#### `GET /communities/{community_id}/units/detailed`
+- Tujuan: list unit detail FE-ready (owner, consumption, devices_count, risk, recommendation, last_seen, status).
+- Auth: Protected (scope check community).
+- Response `200`: `items + meta`.
+
+#### `GET /communities/{community_id}/residents/detailed`
+- Tujuan: list resident detail FE-ready (user, unit, consumption, risk, interaction_metadata).
+- Auth: Protected (scope check community).
+- Response `200`: `items + meta`.
+
+#### `GET /communities/{community_id}/reports/history`
+- Tujuan: histori laporan komunitas multi-bulan.
+- Auth: Protected (scope check community).
+- Response `200`: `items + meta`.
+
+#### `GET /communities/{community_id}/consumption/daily`
+- Tujuan: time series konsumsi harian komunitas untuk laporan.
+- Auth: Protected (scope check community).
+- Response `200`: object analytics harian.
+
+#### `GET /communities/{community_id}/settings`
+#### `PUT /communities/{community_id}/settings`
+- Tujuan: baca/update settings komunitas (`tariff`, `emission_factor`, `thresholds`, `notification_config`).
+- Auth: Protected (`ROLE_ADMIN`, `ROLE_COORDINATOR` scoped).
+
+#### `GET /users/{user_id}/notification-preferences`
+#### `PUT /users/{user_id}/notification-preferences`
+- Tujuan: baca/update preferensi notifikasi user.
+- Auth: Protected (self atau admin).
+
+#### `GET /communities/{community_id}/optimization-simulation`
+- Tujuan: payload simulasi optimasi berbasis konsumsi + rekomendasi AI terbaru.
+- Auth: Protected (scope check community).
 
 #### `GET /notifications`
 - Tujuan: list notifikasi yang tersimpan (dengan delivery status).
@@ -1793,6 +1949,260 @@ Jika unauthorized atau scope tidak cocok:
 - Scope: non-admin harus lolos scope community + unit.
 
 Payload awal:
+```json
+{
+  "type": "unit_dashboard_snapshot",
+  "community_id": "C01",
+  "unit_id": "U01",
+  "data": {
+    "community_id": "C01",
+    "unit_id": "U01",
+    "unit_summary": {},
+    "load_curve": [],
+    "peak_risk": {},
+    "ai_recommendations": [],
+    "generated_at": "2026-05-05T19:00:00+00:00"
+  }
+}
+```
+
+---
+
+### 4.11 Canonical Path & Example Addendum (Semua Endpoint Aktif)
+
+Section ini merapikan endpoint yang sebelumnya ditulis dengan query inline di judul.  
+Semua contoh di bawah adalah **contoh sukses (`2xx`)** dengan format path canonical.
+
+#### `GET /units/{unit_id}/summary`
+- Query contoh: `community_id=C01&period=month`
+- Header:
+```http
+Authorization: Bearer <access_token>
+```
+- Response `200` (contoh ringkas):
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "total_kwh": 124.5,
+  "estimated_cost": 179890.0,
+  "estimated_emission_kg_co2e": 105.825,
+  "device_emissions": [],
+  "period_used": "month",
+  "period_start": "2026-05-01T00:00:00+00:00"
+}
+```
+
+#### `GET /units/{unit_id}/emissions/daily`
+- Query contoh: `community_id=C01&days=30&period=month`
+- Response `200`:
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "period_used": "month",
+  "series": [
+    {"date": "2026-05-01", "total_kwh": 5.6, "estimated_emission_kg_co2e": 4.76}
+  ],
+  "total_emission_kg_co2e": 42.5
+}
+```
+
+#### `GET /units/{unit_id}/reports/history`
+- Query contoh: `community_id=C01&limit=12&offset=0`
+- Response `200`:
+```json
+{
+  "items": [
+    {
+      "period": "2026-05",
+      "total_kwh": 111.2,
+      "estimated_cost": 160686.64,
+      "estimated_emission_kg_co2e": 94.52
+    }
+  ],
+  "meta": {"total": 1, "offset": 0, "limit": 12, "has_next": false, "unread_count": null}
+}
+```
+
+#### `GET /units/{unit_id}/reports/export`
+- Query contoh: `community_id=C01&format=pdf&period=2026-05`
+- Response `200`: file attachment (bukan JSON)
+  - `Content-Type`: `application/pdf` / `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` / `text/csv`
+  - `Content-Disposition`: `attachment; filename="unit_U01_report_2026-05.pdf"`
+
+#### `GET /units/{unit_id}/devices`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "items": [
+    {
+      "device_id": "ac",
+      "device_name": "Air Conditioner",
+      "qty": 1,
+      "is_active": true,
+      "controllable": true,
+      "schedules": [{"start_hour": 18, "end_hour": 22}]
+    }
+  ],
+  "meta": {"total": 1, "offset": 0, "limit": 20, "has_next": false, "unread_count": null}
+}
+```
+
+#### `POST /units/{unit_id}/devices`
+- Query contoh: `community_id=C01`
+- Body contoh:
+```json
+{
+  "device_id": "ac",
+  "qty": 2,
+  "is_active": true,
+  "controllable": true,
+  "schedules": [{"hours": [18, 19, 20, 21, 22]}]
+}
+```
+- Response `200`:
+```json
+{
+  "device_id": "ac",
+  "device_name": "Air Conditioner",
+  "qty": 2,
+  "is_active": true,
+  "controllable": true,
+  "schedules": [{"start_hour": 18, "end_hour": 22}]
+}
+```
+
+#### `PUT /units/{unit_id}/devices/{device_id}`
+- Query contoh: `community_id=C01`
+- Body contoh:
+```json
+{
+  "qty": 3,
+  "is_active": false,
+  "controllable": true,
+  "schedules": [{"hours": [17, 18, 19]}]
+}
+```
+- Response `200`: shape sama seperti `POST /units/{unit_id}/devices`.
+
+#### `DELETE /units/{unit_id}/devices/{device_id}`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{"status":"deleted","unit_id":"U01","device_id":"ac"}
+```
+
+#### `POST /units/{unit_id}/devices/{device_id}/control`
+- Query contoh: `community_id=C01`
+- Body contoh:
+```json
+{"action":"on"}
+```
+- Response `200`:
+```json
+{
+  "status": "sent",
+  "community_id": "C01",
+  "unit_id": "U01",
+  "device_id": "ac",
+  "action": "on"
+}
+```
+
+#### `PUT /units/{unit_id}/va`
+- Query contoh: `community_id=C01`
+- Body contoh:
+```json
+{"va":2200}
+```
+- Response `200`:
+```json
+{"community_id":"C01","unit_id":"U01","va":2200}
+```
+
+#### `GET /units/{unit_id}/ai-recommendations`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "community_id": "C01",
+  "unit_id": "U01",
+  "exists": true,
+  "status": "success",
+  "recommendations": []
+}
+```
+
+#### `GET /ai/last-result`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "community_id": "C01",
+  "exists": true,
+  "status": "success",
+  "result": {}
+}
+```
+
+#### `GET /ai/status`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "community_id": "C01",
+  "exists": true,
+  "healthy": true,
+  "stale": false,
+  "source": "scheduler"
+}
+```
+
+#### `POST /ai/run-now`
+- Query contoh: `community_id=C01`
+- Response `200`:
+```json
+{
+  "status": "success",
+  "community_id": "C01",
+  "processed_samples": 24,
+  "successful_samples": 24
+}
+```
+
+#### `GET /buildings/{building_id}/reports/export`
+- Query contoh: `format=csv&period_start=2026-05-01&period_end=2026-05-31`
+- Response `200`: file attachment (CSV).
+
+#### `GET /communities/{community_id}/reports/export`
+- Query contoh: `format=csv&period_start=2026-05-01&period_end=2026-05-31`
+- Response `200`: file attachment (CSV).
+
+#### `WEBSOCKET /ws/communities/{community_id}/dashboard`
+- Contoh koneksi:
+  - `ws://127.0.0.1:8100/ws/communities/C01/dashboard?token=<access_token>`
+- Payload sukses pertama (snapshot):
+```json
+{
+  "type": "dashboard_snapshot",
+  "community_id": "C01",
+  "data": {
+    "community": {},
+    "units_summary": [],
+    "load_curve": [],
+    "peak_risk": {},
+    "ai_status": {},
+    "generated_at": "2026-05-05T10:00:00+00:00"
+  }
+}
+```
+
+#### `WEBSOCKET /ws/communities/{community_id}/units/{unit_id}/dashboard`
+- Contoh koneksi:
+  - `ws://127.0.0.1:8100/ws/communities/C01/units/U01/dashboard?token=<access_token>`
+- Payload sukses pertama (snapshot):
 ```json
 {
   "type": "unit_dashboard_snapshot",

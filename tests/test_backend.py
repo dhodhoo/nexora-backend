@@ -45,7 +45,7 @@ from fastapi.testclient import TestClient
 
 from app.database import Base, SessionLocal, engine
 from app.main import app
-from app.models import AIAnalysisResult, Building, BuildingUnit, Community, DeviceCommand, Unit, User, UserRole, UserStatus
+from app.models import AIAnalysisResult, Building, BuildingUnit, Community, DeviceCatalog, DeviceCommand, Unit, User, UserRole, UserStatus
 from app.services.ai_integration import ai_orchestrator
 from app.services.ingestion import IngestionService
 from app.utils.time import utc_now
@@ -351,6 +351,8 @@ def test_ingestion_and_unit_summary():
         "schedules": [{"start_hour": 18, "end_hour": 22}],
     }
     IngestionService.ingest_event(db, payload, "energy/C01/U01/consumption")
+    db.add(DeviceCatalog(device_key="ac", display_name="Air Conditioner", controllable=True, is_active=True))
+    db.commit()
     db.close()
 
     with TestClient(app) as client:
@@ -358,6 +360,331 @@ def test_ingestion_and_unit_summary():
         res = client.get("/units/U01/summary", params={"community_id": "C01"}, headers=headers)
         assert res.status_code == 200
         assert res.json()["total_kwh"] >= 1.2
+        assert "device_emissions" in res.json()
+        assert len(res.json()["device_emissions"]) == 1
+        assert res.json()["device_emissions"][0]["device_name"] == "Air Conditioner"
+
+
+def test_unit_daily_emissions_endpoint():
+    db = SessionLocal()
+    community = Community(community_id="CDE", name="Community Daily Emission")
+    db.add(community)
+    unit = Unit(community_id="CDE", unit_id="UDE", va=1300)
+    db.add(unit)
+    db.commit()
+
+    base = datetime.now(timezone.utc)
+    payloads = [
+        {
+            "community_id": "CDE",
+            "unit_id": "UDE",
+            "device_id": "ac",
+            "timestamp": (base - timedelta(days=1)).isoformat(),
+            "kwh": 1.0,
+            "controllable": True,
+            "schedules": [],
+        },
+        {
+            "community_id": "CDE",
+            "unit_id": "UDE",
+            "device_id": "lamp",
+            "timestamp": base.isoformat(),
+            "kwh": 0.5,
+            "controllable": True,
+            "schedules": [],
+        },
+    ]
+    for payload in payloads:
+        IngestionService.ingest_event(db, payload, "energy/CDE/UDE/consumption")
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.get("/units/UDE/emissions/daily", params={"community_id": "CDE", "days": 30, "period": "all"}, headers=headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["community_id"] == "CDE"
+        assert body["unit_id"] == "UDE"
+        assert "series" in body
+        assert len(body["series"]) >= 2
+        assert body["total_emission_kg_co2e"] > 0
+
+
+def test_unit_reports_history_multi_month_contract():
+    db = SessionLocal()
+    community = db.query(Community).filter(Community.community_id == "CRH").first()
+    if not community:
+        db.add(Community(community_id="CRH", name="Community Report History"))
+    unit = db.query(Unit).filter(Unit.community_id == "CRH", Unit.unit_id == "URH").first()
+    if not unit:
+        db.add(Unit(community_id="CRH", unit_id="URH", va=1300))
+    db.commit()
+
+    payloads = [
+        {"ts": datetime(2026, 1, 15, 9, 0, tzinfo=timezone.utc), "kwh": 3.0},
+        {"ts": datetime(2026, 2, 15, 9, 0, tzinfo=timezone.utc), "kwh": 2.0},
+        {"ts": datetime(2026, 3, 15, 9, 0, tzinfo=timezone.utc), "kwh": 1.0},
+    ]
+    for p in payloads:
+        IngestionService.ingest_event(
+            db,
+            {
+                "community_id": "CRH",
+                "unit_id": "URH",
+                "device_id": "ac",
+                "timestamp": p["ts"].isoformat(),
+                "kwh": p["kwh"],
+                "controllable": True,
+                "schedules": [],
+            },
+            "energy/CRH/URH/consumption",
+        )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.get(
+            "/units/URH/reports/history",
+            params={"community_id": "CRH", "limit": 2, "offset": 0},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert "items" in body and "meta" in body
+        assert body["meta"]["limit"] == 2
+        assert body["meta"]["total"] >= 3
+        assert body["items"][0]["period"] == "2026-03"
+        assert body["items"][1]["period"] == "2026-02"
+        assert "estimated_emission_kg_co2e" in body["items"][0]
+        assert "estimated_cost" in body["items"][0]
+
+
+def test_unit_reports_export_formats():
+    db = SessionLocal()
+    community = db.query(Community).filter(Community.community_id == "CEX").first()
+    if not community:
+        db.add(Community(community_id="CEX", name="Community Export"))
+    unit = db.query(Unit).filter(Unit.community_id == "CEX", Unit.unit_id == "UEX").first()
+    if not unit:
+        db.add(Unit(community_id="CEX", unit_id="UEX", va=1300))
+    db.commit()
+
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CEX",
+            "unit_id": "UEX",
+            "device_id": "lamp",
+            "timestamp": datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc).isoformat(),
+            "kwh": 1.5,
+            "controllable": True,
+            "schedules": [],
+        },
+        "energy/CEX/UEX/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        csv_res = client.get(
+            "/units/UEX/reports/export",
+            params={"community_id": "CEX", "format": "csv", "period": "2026-03"},
+            headers=headers,
+        )
+        assert csv_res.status_code == 200
+        assert csv_res.headers["content-type"].startswith("text/csv")
+        assert "attachment; filename=\"unit_UEX_report_2026-03.csv\"" in csv_res.headers["content-disposition"]
+
+        xlsx_res = client.get(
+            "/units/UEX/reports/export",
+            params={"community_id": "CEX", "format": "xlsx", "period": "2026-03"},
+            headers=headers,
+        )
+        assert xlsx_res.status_code == 200
+        assert xlsx_res.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert xlsx_res.content[:2] == b"PK"
+
+        pdf_res = client.get(
+            "/units/UEX/reports/export",
+            params={"community_id": "CEX", "format": "pdf", "period": "2026-03"},
+            headers=headers,
+        )
+        assert pdf_res.status_code == 200
+        assert pdf_res.headers["content-type"].startswith("application/pdf")
+        assert pdf_res.content[:4] == b"%PDF"
+
+
+def test_community_units_and_residents_detailed_contract():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CDTL").first():
+        db.add(Community(community_id="CDTL", name="Community Detail"))
+    if not db.query(Unit).filter(Unit.community_id == "CDTL", Unit.unit_id == "UD01").first():
+        db.add(Unit(community_id="CDTL", unit_id="UD01", va=1300))
+    if not db.query(User).filter(User.user_id == "resident-dtl").first():
+        db.add(
+            User(
+                user_id="resident-dtl",
+                full_name="Resident Detail",
+                email="resident-dtl@nexora.local",
+                password_hash="hashed",
+                role=UserRole.RESIDENT,
+                status=UserStatus.ACTIVE,
+                community_id="CDTL",
+                unit_id="UD01",
+            )
+        )
+    db.commit()
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CDTL",
+            "unit_id": "UD01",
+            "device_id": "ac",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kwh": 1.1,
+            "controllable": True,
+            "schedules": [],
+        },
+        "energy/CDTL/UD01/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        units_res = client.get("/communities/CDTL/units/detailed", headers=headers)
+        assert units_res.status_code == 200
+        units_body = units_res.json()
+        assert "items" in units_body and "meta" in units_body
+        assert len(units_body["items"]) >= 1
+        assert {"unit_id", "owner", "consumption", "devices_count", "risk", "recommendation", "last_seen", "status"}.issubset(
+            set(units_body["items"][0].keys())
+        )
+
+        residents_res = client.get("/communities/CDTL/residents/detailed", headers=headers)
+        assert residents_res.status_code == 200
+        residents_body = residents_res.json()
+        assert "items" in residents_body and "meta" in residents_body
+        assert len(residents_body["items"]) >= 1
+        assert {"user", "unit", "consumption", "risk", "interaction_metadata"}.issubset(
+            set(residents_body["items"][0].keys())
+        )
+
+
+def test_community_reports_history_and_daily_contract():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CRPT").first():
+        db.add(Community(community_id="CRPT", name="Community Report"))
+    if not db.query(Unit).filter(Unit.community_id == "CRPT", Unit.unit_id == "URPT").first():
+        db.add(Unit(community_id="CRPT", unit_id="URPT", va=1300))
+    db.commit()
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CRPT",
+            "unit_id": "URPT",
+            "device_id": "lamp",
+            "timestamp": datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc).isoformat(),
+            "kwh": 2.5,
+            "controllable": True,
+            "schedules": [],
+        },
+        "energy/CRPT/URPT/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        history_res = client.get("/communities/CRPT/reports/history", headers=headers)
+        assert history_res.status_code == 200
+        history = history_res.json()
+        assert "items" in history and "meta" in history
+        daily_res = client.get("/communities/CRPT/consumption/daily", params={"days": 7}, headers=headers)
+        assert daily_res.status_code == 200
+        daily = daily_res.json()
+        assert {"community_id", "series", "period_used", "period_start", "last_timestamp", "is_fresh"}.issubset(set(daily.keys()))
+
+
+def test_community_settings_notification_preferences_and_optimization():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CSET").first():
+        db.add(Community(community_id="CSET", name="Community Settings"))
+    if not db.query(Unit).filter(Unit.community_id == "CSET", Unit.unit_id == "USET").first():
+        db.add(Unit(community_id="CSET", unit_id="USET", va=1300))
+    db.commit()
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CSET",
+            "unit_id": "USET",
+            "device_id": "ac",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kwh": 1.0,
+            "controllable": True,
+            "schedules": [],
+        },
+        "energy/CSET/USET/consumption",
+    )
+    db.add(
+        AIAnalysisResult(
+            community_id="CSET",
+            status="success",
+            stale=False,
+            source="manual",
+            payload={},
+            result={
+                "result": {
+                    "recommendations": [
+                        {
+                            "unit_id": "USET",
+                            "device": "ac",
+                            "action": "turn_off",
+                            "estimated_reduction_kwh": 1.2,
+                            "saving": 1000,
+                            "co2_reduction": 0.5,
+                            "reasons": ["test"],
+                        }
+                    ]
+                }
+            },
+            error="",
+        )
+    )
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        get_settings = client.get("/communities/CSET/settings", headers=headers)
+        assert get_settings.status_code == 200
+        put_settings = client.put(
+            "/communities/CSET/settings",
+            json={
+                "tariff": 1500,
+                "emission_factor": 0.9,
+                "thresholds": {"high_kwh": 2.0, "critical_kwh": 3.5},
+                "notification_config": {"enabled": True, "daily_digest": False, "realtime_alert": True},
+            },
+            headers=headers,
+        )
+        assert put_settings.status_code == 200
+        assert put_settings.json()["tariff"] == 1500
+
+        prefs_put = client.put(
+            "/users/admin-001/notification-preferences",
+            json={"preferences": {"email": True, "push": False}},
+            headers=headers,
+        )
+        assert prefs_put.status_code == 200
+        prefs_get = client.get("/users/admin-001/notification-preferences", headers=headers)
+        assert prefs_get.status_code == 200
+        assert prefs_get.json()["preferences"]["email"] is True
+
+        sim = client.get("/communities/CSET/optimization-simulation", headers=headers)
+        assert sim.status_code == 200
+        sim_body = sim.json()
+        assert {"community_id", "exists", "summary", "scenarios"}.issubset(set(sim_body.keys()))
 
 
 def test_ai_health_and_run_now_success():
@@ -1506,15 +1833,17 @@ def test_unit_device_qty_contract_and_validation():
         assert create_default.status_code in (200, 400)
         if create_default.status_code == 200:
             assert create_default.json()["qty"] == 1
+            assert create_default.json()["is_active"] is True
 
         update_qty = client.put(
             "/units/UQTY/devices/lamp-qty",
             params={"community_id": "CQTY"},
-            json={"qty": 3},
+            json={"qty": 3, "is_active": False},
             headers=headers,
         )
         assert update_qty.status_code == 200
         assert update_qty.json()["qty"] == 3
+        assert update_qty.json()["is_active"] is False
 
         list_devices = client.get(
             "/units/UQTY/devices",
@@ -1526,6 +1855,7 @@ def test_unit_device_qty_contract_and_validation():
         target = next((x for x in items if x["device_id"] == "lamp-qty"), None)
         assert target is not None
         assert target["qty"] == 3
+        assert target["is_active"] is False
 
         invalid_qty = client.post(
             "/units/UQTY/devices",
@@ -1541,8 +1871,228 @@ def test_unit_device_qty_contract_and_validation():
             json={"action": "off"},
             headers=headers,
         )
-        assert control_qty.status_code == 200
-        assert control_qty.json()["status"] in ("sent", "failed")
+        assert control_qty.status_code == 400
+        err_msg = control_qty.json().get("detail") or control_qty.json().get("error", "")
+        assert "inactive" in err_msg.lower()
+
+        reactivate = client.put(
+            "/units/UQTY/devices/lamp-qty",
+            params={"community_id": "CQTY"},
+            json={"is_active": True},
+            headers=headers,
+        )
+        assert reactivate.status_code == 200
+        assert reactivate.json()["is_active"] is True
+
+        control_qty_after_reactivate = client.post(
+            "/units/UQTY/devices/lamp-qty/control",
+            params={"community_id": "CQTY"},
+            json={"action": "off"},
+            headers=headers,
+        )
+        assert control_qty_after_reactivate.status_code == 200
+        assert control_qty_after_reactivate.json()["status"] in ("sent", "failed")
+
+
+def test_unit_device_update_strict_validation_and_schedule_update():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CUPD").first():
+        db.add(Community(community_id="CUPD", name="Community Update"))
+    if not db.query(Unit).filter(Unit.community_id == "CUPD", Unit.unit_id == "UUPD").first():
+        db.add(Unit(community_id="CUPD", unit_id="UUPD", va=2200))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        create = client.post(
+            "/units/UUPD/devices",
+            params={"community_id": "CUPD"},
+            json={"device_id": "ac-upd", "controllable": True, "schedules": [{"start_hour": 8, "end_hour": 10}]},
+            headers=headers,
+        )
+        assert create.status_code in (200, 400)
+
+        bad_typo = client.put(
+            "/units/UUPD/devices/ac-upd",
+            params={"community_id": "CUPD"},
+            json={"schedule": [{"start_hour": 9, "end_hour": 11}]},
+            headers=headers,
+        )
+        assert bad_typo.status_code == 400
+
+        no_op = client.put(
+            "/units/UUPD/devices/ac-upd",
+            params={"community_id": "CUPD"},
+            json={},
+            headers=headers,
+        )
+        assert no_op.status_code == 400
+
+        good_update = client.put(
+            "/units/UUPD/devices/ac-upd",
+            params={"community_id": "CUPD"},
+            json={"schedules": [{"start_hour": 9, "end_hour": 11}]},
+            headers=headers,
+        )
+        assert good_update.status_code == 200
+
+        listed = client.get(
+            "/units/UUPD/devices",
+            params={"community_id": "CUPD", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert listed.status_code == 200
+        item = next((x for x in listed.json()["items"] if x["device_id"] == "ac-upd"), None)
+        assert item is not None
+        assert item["schedules"] == [{"start_hour": 9, "end_hour": 11}]
+
+
+def test_mqtt_ingestion_without_schedules_does_not_clear_manual_schedules():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CMQTT").first():
+        db.add(Community(community_id="CMQTT", name="Community MQTT"))
+    if not db.query(Unit).filter(Unit.community_id == "CMQTT", Unit.unit_id == "UMQTT").first():
+        db.add(Unit(community_id="CMQTT", unit_id="UMQTT", va=2200))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+
+        create = client.post(
+            "/units/UMQTT/devices",
+            params={"community_id": "CMQTT"},
+            json={
+                "device_id": "ac-mqtt",
+                "controllable": True,
+                "schedules": [{"start_hour": 18, "end_hour": 22}],
+            },
+            headers=headers,
+        )
+        assert create.status_code in (200, 400)
+
+        # Ingestion event without schedules should not wipe schedules set by PUT/POST.
+        db2 = SessionLocal()
+        IngestionService.ingest_event(
+            db2,
+            {
+                "community_id": "CMQTT",
+                "unit_id": "UMQTT",
+                "device_id": "ac-mqtt",
+                "timestamp": "2026-05-07T12:00:00+00:00",
+                "kwh": 1.1,
+                "controllable": True,
+            },
+            "energy/CMQTT/UMQTT/consumption",
+        )
+        # A payload with explicit schedules=null must also keep existing schedule.
+        IngestionService.ingest_event(
+            db2,
+            {
+                "community_id": "CMQTT",
+                "unit_id": "UMQTT",
+                "device_id": "ac-mqtt",
+                "timestamp": "2026-05-07T12:30:00+00:00",
+                "kwh": 1.05,
+                "controllable": True,
+                "schedules": None,
+            },
+            "energy/CMQTT/UMQTT/consumption",
+        )
+        db2.close()
+
+        listed = client.get(
+            "/units/UMQTT/devices",
+            params={"community_id": "CMQTT", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert listed.status_code == 200
+        item = next((x for x in listed.json()["items"] if x["device_id"] == "ac-mqtt"), None)
+        assert item is not None
+        assert item["schedules"] == [{"start_hour": 18, "end_hour": 22}]
+        assert item["schedule_source"] == "manual"
+
+        # Ingestion event with explicit schedules must NOT overwrite because source is manual.
+        db3 = SessionLocal()
+        IngestionService.ingest_event(
+            db3,
+            {
+                "community_id": "CMQTT",
+                "unit_id": "UMQTT",
+                "device_id": "ac-mqtt",
+                "timestamp": "2026-05-07T13:00:00+00:00",
+                "kwh": 1.2,
+                "controllable": True,
+                "schedules": [{"start_hour": 9, "end_hour": 11}],
+            },
+            "energy/CMQTT/UMQTT/consumption",
+        )
+        db3.close()
+
+        listed_after = client.get(
+            "/units/UMQTT/devices",
+            params={"community_id": "CMQTT", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert listed_after.status_code == 200
+        item_after = next((x for x in listed_after.json()["items"] if x["device_id"] == "ac-mqtt"), None)
+        assert item_after is not None
+        assert item_after["schedules"] == [{"start_hour": 18, "end_hour": 22}]
+        assert item_after["schedule_source"] == "manual"
+
+
+def test_mqtt_schedule_source_device_can_still_update_from_mqtt():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CMQ2").first():
+        db.add(Community(community_id="CMQ2", name="Community MQTT 2"))
+    if not db.query(Unit).filter(Unit.community_id == "CMQ2", Unit.unit_id == "UMQ2").first():
+        db.add(Unit(community_id="CMQ2", unit_id="UMQ2", va=2200))
+    db.commit()
+
+    # Create device via ingestion path (source=mqtt).
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CMQ2",
+            "unit_id": "UMQ2",
+            "device_id": "ac-live",
+            "timestamp": "2026-05-07T10:00:00+00:00",
+            "kwh": 1.0,
+            "controllable": True,
+            "schedules": [{"start_hour": 7, "end_hour": 9}],
+        },
+        "energy/CMQ2/UMQ2/consumption",
+    )
+    # Another ingestion updates schedules because source remains mqtt.
+    IngestionService.ingest_event(
+        db,
+        {
+            "community_id": "CMQ2",
+            "unit_id": "UMQ2",
+            "device_id": "ac-live",
+            "timestamp": "2026-05-07T11:00:00+00:00",
+            "kwh": 1.1,
+            "controllable": True,
+            "schedules": [{"start_hour": 9, "end_hour": 11}],
+        },
+        "energy/CMQ2/UMQ2/consumption",
+    )
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        listed = client.get(
+            "/units/UMQ2/devices",
+            params={"community_id": "CMQ2", "offset": 0, "limit": 20},
+            headers=headers,
+        )
+        assert listed.status_code == 200
+        item = next((x for x in listed.json()["items"] if x["device_id"] == "ac-live"), None)
+        assert item is not None
+        assert item["schedule_source"] == "mqtt"
+        assert item["schedules"] == [{"start_hour": 9, "end_hour": 11}]
 
 
 def test_period_month_week_filter_and_comparison():

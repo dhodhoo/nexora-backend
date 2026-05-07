@@ -1,6 +1,7 @@
 # FE Freeze Contract (Final) - Nexora Backend
 
 Dokumen ini adalah kontrak final untuk integrasi Frontend ke backend Nexora pada fase demo saat ini.
+Referensi endpoint + contoh payload/response resmi: [API_REFERENCE.md](/D:/nexora/nexora-backend/docs/API_REFERENCE.md).
 
 ## 1) Base & Auth
 - Base URL: `http://127.0.0.1:8100`
@@ -27,9 +28,18 @@ Catatan bootstrap auth:
 2. `GET /communities/{community_id}/dashboard`
 3. `GET /communities/{community_id}/ai-recommendations`
 4. `GET /units/{unit_id}/ai-recommendations?community_id=...`
-4. `WS /ws/communities/{community_id}/dashboard`
-5. `GET /communities/{community_id}/units/{unit_id}/dashboard`
-6. `WS /ws/communities/{community_id}/units/{unit_id}/dashboard`
+5. `GET /units/{unit_id}/summary?community_id=...`
+6. `GET /units/{unit_id}/emissions/daily?community_id=...`
+7. `WS /ws/communities/{community_id}/dashboard`
+8. `GET /communities/{community_id}/units/{unit_id}/dashboard`
+9. `WS /ws/communities/{community_id}/units/{unit_id}/dashboard`
+10. `GET /communities/{community_id}/units/detailed`
+11. `GET /communities/{community_id}/residents/detailed`
+12. `GET /communities/{community_id}/reports/history`
+13. `GET /communities/{community_id}/consumption/daily`
+14. `GET /communities/{community_id}/settings`
+15. `PUT /communities/{community_id}/settings`
+16. `GET /communities/{community_id}/optimization-simulation`
 - Untuk analytics periodik, endpoint dashboard/summary mendukung query `period=all|month|week` (default `all`).
 - Untuk `period=month|week`, response juga menyertakan blok `comparison` (persen konsumsi/tagihan/emisi vs periode sebelumnya). Jika periode sebelumnya nol, nilai persen akan `null`.
 - Semua endpoint analytics utama juga menyertakan blok `recommendation_compliance`:
@@ -70,9 +80,15 @@ Catatan bootstrap auth:
   - `GET /notifications/{notification_id}`
   - `POST /notifications/{notification_id}/mark-read`
   - `POST /notifications/mark-all-read`
-- CSV export:
+- Export laporan:
   - `GET /communities/{community_id}/reports/export?format=csv`
   - `GET /buildings/{building_id}/reports/export?format=csv`
+  - `GET /units/{unit_id}/reports/export?community_id=...&format=pdf|xlsx|csv&period=YYYY-MM`
+- Riwayat laporan unit:
+  - `GET /units/{unit_id}/reports/history?community_id=...&limit=12&offset=0`
+- Preferences notifikasi user:
+  - `GET /users/{user_id}/notification-preferences`
+  - `PUT /users/{user_id}/notification-preferences`
 
 ### D. Ops & Debug (Admin)
 - `GET /health`
@@ -98,8 +114,42 @@ Field wajib item device:
 - `device_id`
 - `device_name` (dari catalog, fallback ke `device_id`)
 - `qty` (integer >= 1)
+- `is_active` (boolean status operasional; jika `false`, control ditolak backend)
+- `schedule_source` (`manual` | `mqtt`) untuk transparansi sumber schedule
 - `controllable`
 - `schedules`
+- Catatan integrasi: saat update device, kirim field `schedules` (plural). Field typo seperti `schedule` akan ditolak `400`.
+
+### `/units/{unit_id}/summary`
+Field wajib:
+- `estimated_emission_kg_co2e`
+- `device_emissions[]`
+- `device_emissions[].device_id`
+- `device_emissions[].device_name`
+- `device_emissions[].total_kwh`
+- `device_emissions[].estimated_emission_kg_co2e`
+
+### `/units/{unit_id}/emissions/daily`
+Field wajib:
+- `community_id`
+- `unit_id`
+- `period_used`
+- `series[]`
+- `series[].date`
+- `series[].estimated_emission_kg_co2e`
+- `total_emission_kg_co2e`
+
+### `/units/{unit_id}/reports/history`
+Field wajib:
+- `items[]`
+- `items[].period` (`YYYY-MM`)
+- `items[].total_kwh`
+- `items[].estimated_cost`
+- `items[].estimated_emission_kg_co2e`
+- `meta.total`
+- `meta.offset`
+- `meta.limit`
+- `meta.has_next`
 
 ### Notifications List
 Field wajib:

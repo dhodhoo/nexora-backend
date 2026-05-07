@@ -57,6 +57,29 @@ class CommunitySimulationConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
 
 
+class CommunitySetting(Base):
+    __tablename__ = "community_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    community_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    tariff: Mapped[float] = mapped_column(Float, nullable=False, default=1444.7)
+    emission_factor: Mapped[float] = mapped_column(Float, nullable=False, default=0.85)
+    thresholds: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    notification_config: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
+
+
+class UserNotificationPreference(Base):
+    __tablename__ = "user_notification_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    preferences: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
+
+
 class UserRole(str, enum.Enum):
     ADMIN = "ROLE_ADMIN"
     COORDINATOR = "ROLE_COORDINATOR"
@@ -110,6 +133,8 @@ class Device(Base):
     unit_id: Mapped[int] = mapped_column(ForeignKey("units.id"), index=True)
     device_id: Mapped[str] = mapped_column(String(64), index=True)
     qty: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    schedule_source: Mapped[str] = mapped_column(String(16), nullable=False, default="mqtt", index=True)
     controllable: Mapped[bool] = mapped_column(Boolean, default=False)
     schedules: Mapped[list] = mapped_column(JSON, nullable=True)
 

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import csv
 import io
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import SessionLocal, get_db
 from app.models import AIAnalysisResult, AuditLog, Building, BuildingConfig, BuildingUnit, Community, CommunitySimulationConfig, DeadLetter, Device, DeviceCatalog, DeviceCommand, EnergyReading, Notification, NotificationDelivery, NotificationRead, RevokedToken, Unit, User, UserRole, UserStatus
+from app.models import CommunitySetting, UserNotificationPreference
 from app.schemas import (
     AddCommunityMemberRequest,
     AIRecommendationsResponse,
@@ -40,6 +42,26 @@ from app.schemas import (
     CommunityMemberMutationResponse,
     CommunitySimulationStateResponse,
     CommunitySimulationToggleRequest,
+    CommunityUnitsDetailedResponse,
+    CommunityResidentsDetailedResponse,
+    ResidentDetailedItem,
+    ResidentDetailedUnit,
+    ResidentDetailedUser,
+    ResidentInteractionMetadata,
+    UnitDetailedConsumption,
+    UnitDetailedItem,
+    UnitDetailedOwner,
+    UnitDetailedRisk,
+    CommunityReportHistoryResponse,
+    CommunityReportHistoryItem,
+    CommunityDailyConsumptionResponse,
+    CommunityDailyConsumptionPoint,
+    CommunitySettingsResponse,
+    CommunitySettingsUpdateRequest,
+    UserNotificationPreferencesResponse,
+    UserNotificationPreferencesUpdateRequest,
+    OptimizationSimulationResponse,
+    OptimizationSimulationSummary,
     CommunityMembersListResponse,
     CommunitiesListResponse,
     CommunityCreateRequest,
@@ -49,6 +71,7 @@ from app.schemas import (
     DashboardResponse,
     DeadLetterItem,
     DeadLettersListResponse,
+    DeviceEmissionItem,
     DeviceMetadataResponse,
     DeviceCatalogCreateRequest,
     DeviceCatalogListResponse,
@@ -71,6 +94,10 @@ from app.schemas import (
     UnitCreateRequest,
     UnitDeviceCreateRequest,
     UnitDashboardResponse,
+    UnitDailyEmissionPoint,
+    UnitDailyEmissionsResponse,
+    UnitReportHistoryItem,
+    UnitReportHistoryResponse,
     UnitDeviceResponse,
     UnitDevicesListResponse,
     UnitDeviceUpdateRequest,
@@ -91,7 +118,11 @@ from app.schemas import (
     NotificationMarkAllReadResponse,
 )
 from app.services.ai_integration import ai_orchestrator
-from app.services.ai_recommendations import get_latest_ai_result, parse_recommendations
+from app.services.ai_recommendations import (
+    get_latest_ai_result,
+    parse_recommendations,
+    recommendations_map_by_unit,
+)
 from app.services.auth import AuthService, ensure_building_access, ensure_community_access, get_current_user, require_roles
 from app.services.dashboard import build_dashboard_snapshot, build_load_curve, build_peak_risk, build_units_summary, build_unit_dashboard_snapshot, resolve_period
 from app.services.device_control import publish_device_command
@@ -99,6 +130,14 @@ from app.services.ingestion import QueryService
 from app.services.rate_limit import broadcast_rate_limiter
 from app.services.realtime_ws import dashboard_ws_manager
 from app.services.recommendation_compliance import compute_recommendation_compliance
+from app.services.unit_reports import (
+    build_unit_report_csv,
+    build_unit_report_pdf,
+    build_unit_report_xlsx,
+    compute_unit_period_report,
+    list_unit_report_history,
+    parse_period_yyyy_mm,
+)
 from app.utils.time import assume_utc, utc_now
 
 router = APIRouter()
@@ -124,6 +163,12 @@ def _validate_sort_order(sort_order: str) -> None:
 def _validate_sort_by(sort_by: str, allowed: set[str]) -> None:
     if sort_by not in allowed:
         raise HTTPException(status_code=400, detail=f"sort_by must be one of: {', '.join(sorted(allowed))}")
+
+
+def _validate_days(days: int) -> int:
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+    return days
 
 
 def _building_unit_ids(db: Session, building_id: str) -> list[str]:
@@ -356,6 +401,8 @@ def _to_unit_device_response(row: Device, device_name: str) -> UnitDeviceRespons
         device_id=row.device_id,
         device_name=device_name,
         qty=row.qty,
+        is_active=row.is_active,
+        schedule_source=row.schedule_source,
         controllable=row.controllable,
         schedules=row.schedules,
     )
@@ -365,6 +412,54 @@ def _parse_period(period_start: str | None, period_end: str | None):
     start_dt = assume_utc(datetime.fromisoformat(period_start)) if period_start else None
     end_dt = assume_utc(datetime.fromisoformat(period_end)) if period_end else None
     return start_dt, end_dt
+
+
+def _validate_period_yyyy_mm(period: str) -> str:
+    if not re.match(r"^\d{4}-\d{2}$", period):
+        raise HTTPException(status_code=400, detail="period must use YYYY-MM format")
+    return period
+
+
+def _community_conditions(
+    community_id: str,
+    include_simulation: bool,
+    period_start: datetime | None = None,
+    period_end: datetime | None = None,
+):
+    conditions = [EnergyReading.community_id == community_id]
+    if period_start:
+        conditions.append(EnergyReading.timestamp >= period_start.replace(tzinfo=None))
+    if period_end:
+        conditions.append(EnergyReading.timestamp <= period_end.replace(tzinfo=None))
+    if not include_simulation:
+        conditions.append(EnergyReading.is_simulation.is_(False))
+    return conditions
+
+
+def _unit_conditions(
+    community_id: str,
+    unit_id: str,
+    include_simulation: bool,
+    period_start: datetime | None = None,
+    period_end: datetime | None = None,
+):
+    conditions = [EnergyReading.community_id == community_id, EnergyReading.unit_id == unit_id]
+    if period_start:
+        conditions.append(EnergyReading.timestamp >= period_start.replace(tzinfo=None))
+    if period_end:
+        conditions.append(EnergyReading.timestamp <= period_end.replace(tzinfo=None))
+    if not include_simulation:
+        conditions.append(EnergyReading.is_simulation.is_(False))
+    return conditions
+
+
+def _community_settings_defaults() -> dict:
+    return {
+        "tariff": 1444.7,
+        "emission_factor": settings.emission_factor_kg_co2e_per_kwh,
+        "thresholds": {"high_kwh": 1.5, "critical_kwh": 3.0},
+        "notification_config": {"enabled": True, "daily_digest": True, "realtime_alert": True},
+    }
 
 
 def _build_csv_export(unit_rows: list[dict], total_kwh: float, total_cost: float) -> str:
@@ -1415,8 +1510,21 @@ def create_unit(community_id: str, payload: UnitCreateRequest, db: Session = Dep
     return UnitCrudResponse(community_id=unit.community_id, unit_id=unit.unit_id, va=unit.va)
 
 
-@router.get("/communities/{community_id}/units/{unit_id}", response_model=UnitCrudResponse)
+@router.get(
+    "/communities/{community_id}/units/{unit_id}",
+    response_model=UnitCrudResponse | CommunityUnitsDetailedResponse,
+)
 def get_unit(community_id: str, unit_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if unit_id == "detailed":
+        return community_units_detailed(
+            community_id=community_id,
+            offset=0,
+            limit=20,
+            include_simulation=None,
+            period="all",
+            db=db,
+            current_user=current_user,
+        )
     ensure_community_access(community_id, current_user)
     unit = db.execute(select(Unit).where(and_(Unit.community_id == community_id, Unit.unit_id == unit_id))).scalar_one_or_none()
     if not unit:
@@ -1487,6 +1595,31 @@ def unit_summary(
     total_kwh, estimated_cost, last_timestamp = db.execute(
         select(func.coalesce(func.sum(EnergyReading.kwh), 0.0), func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0), func.max(EnergyReading.timestamp)).where(and_(*conditions))
     ).one()
+    device_rows = db.execute(
+        select(
+            EnergyReading.device_id,
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+        )
+        .where(and_(*conditions))
+        .group_by(EnergyReading.device_id)
+        .order_by(EnergyReading.device_id)
+    ).all()
+    device_ids = [str(r.device_id) for r in device_rows]
+    display_name_map: dict[str, str] = {}
+    if device_ids:
+        catalog_rows = db.execute(
+            select(DeviceCatalog.device_key, DeviceCatalog.display_name).where(DeviceCatalog.device_key.in_(device_ids))
+        ).all()
+        display_name_map = {str(r.device_key): str(r.display_name) for r in catalog_rows}
+    device_emissions = [
+        DeviceEmissionItem(
+            device_id=str(r.device_id),
+            device_name=display_name_map.get(str(r.device_id), str(r.device_id)),
+            total_kwh=float(r.total_kwh),
+            estimated_emission_kg_co2e=QueryService.emission(float(r.total_kwh)),
+        )
+        for r in device_rows
+    ]
     comparison = None
     current_compliance = compute_recommendation_compliance(
         db=db,
@@ -1541,12 +1674,172 @@ def unit_summary(
         total_kwh=float(total_kwh),
         estimated_cost=float(estimated_cost),
         estimated_emission_kg_co2e=QueryService.emission(float(total_kwh)),
+        device_emissions=device_emissions,
         last_timestamp=last_timestamp,
         is_fresh=QueryService.freshness(last_timestamp),
         period_used=period_used,
         period_start=period_start,
         comparison=comparison,
         recommendation_compliance=current_compliance.to_schema(window_hours=24),
+    )
+
+
+@router.get("/units/{unit_id}/emissions/daily", response_model=UnitDailyEmissionsResponse)
+def unit_daily_emissions(
+    unit_id: str,
+    community_id: str,
+    days: int = 30,
+    period: str = "all",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    days = _validate_days(days)
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    ensure_community_access(community_id, current_user)
+    _ensure_unit_access(unit_id, current_user)
+    community_exists = db.execute(select(Community.id).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community_exists:
+        raise HTTPException(status_code=404, detail="Not found")
+    unit_exists = db.execute(select(Unit.id).where(and_(Unit.community_id == community_id, Unit.unit_id == unit_id))).scalar_one_or_none()
+    if not unit_exists:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    now = utc_now()
+    days_start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    effective_start = days_start if not period_start else max(days_start, period_start)
+    effective_end = period_end or now
+
+    conditions = [
+        EnergyReading.community_id == community_id,
+        EnergyReading.unit_id == unit_id,
+        EnergyReading.timestamp >= effective_start.replace(tzinfo=None),
+        EnergyReading.timestamp <= effective_end.replace(tzinfo=None),
+    ]
+    if current_user.role != UserRole.ADMIN:
+        conditions.append(EnergyReading.is_simulation.is_(False))
+
+    rows = db.execute(
+        select(
+            func.date(EnergyReading.timestamp).label("day"),
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+        )
+        .where(and_(*conditions))
+        .group_by(func.date(EnergyReading.timestamp))
+        .order_by(func.date(EnergyReading.timestamp))
+    ).all()
+
+    last_timestamp = db.execute(
+        select(func.max(EnergyReading.timestamp)).where(and_(*conditions))
+    ).scalar_one_or_none()
+
+    series = [
+        UnitDailyEmissionPoint(
+            date=str(r.day),
+            total_kwh=float(r.total_kwh),
+            estimated_emission_kg_co2e=QueryService.emission(float(r.total_kwh)),
+        )
+        for r in rows
+    ]
+    total_emission = sum(point.estimated_emission_kg_co2e for point in series)
+
+    return UnitDailyEmissionsResponse(
+        community_id=community_id,
+        unit_id=unit_id,
+        period_used=period_used,
+        period_start=period_start,
+        series=series,
+        total_emission_kg_co2e=float(total_emission),
+        last_timestamp=last_timestamp,
+        is_fresh=QueryService.freshness(last_timestamp),
+    )
+
+
+@router.get("/units/{unit_id}/reports/history", response_model=UnitReportHistoryResponse)
+def unit_reports_history(
+    unit_id: str,
+    community_id: str,
+    offset: int = 0,
+    limit: int = 12,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit must be >= 1")
+    limit = min(limit, 60)
+    _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    include_simulation = current_user.role == UserRole.ADMIN
+    rows, total = list_unit_report_history(
+        db,
+        community_id=community_id,
+        unit_id=unit_id,
+        include_simulation=include_simulation,
+        offset=offset,
+        limit=limit,
+    )
+    items = [
+        UnitReportHistoryItem(
+            period=r.period,
+            total_kwh=r.total_kwh,
+            estimated_cost=r.estimated_cost,
+            estimated_emission_kg_co2e=r.estimated_emission_kg_co2e,
+            last_timestamp=r.last_timestamp,
+            is_fresh=r.is_fresh,
+        )
+        for r in rows
+    ]
+    return UnitReportHistoryResponse(items=items, meta=_meta(total, offset, limit))
+
+
+@router.get("/units/{unit_id}/reports/export")
+def unit_reports_export(
+    unit_id: str,
+    community_id: str,
+    format: str = "csv",
+    period: str = Query(..., description="YYYY-MM"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_unit_operation_access(db, current_user, community_id, unit_id)
+    format_value = format.lower()
+    if format_value not in {"csv", "xlsx", "pdf"}:
+        raise HTTPException(status_code=400, detail="format must be one of: csv, xlsx, pdf")
+    period_value = _validate_period_yyyy_mm(period)
+    try:
+        period_start, period_end = parse_period_yyyy_mm(period_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    include_simulation = current_user.role == UserRole.ADMIN
+    report_data = compute_unit_period_report(
+        db,
+        community_id=community_id,
+        unit_id=unit_id,
+        period_start=period_start,
+        period_end=period_end,
+        include_simulation=include_simulation,
+    )
+
+    filename = f"unit_{unit_id}_report_{period_value}.{format_value}"
+    if format_value == "csv":
+        content = build_unit_report_csv(period_value, report_data)
+        media_type = "text/csv"
+    elif format_value == "xlsx":
+        content = build_unit_report_xlsx(period_value, report_data)
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        content = build_unit_report_pdf(period_value, report_data)
+        media_type = "application/pdf"
+
+    return StreamingResponse(
+        iter([content]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1720,6 +2013,421 @@ def community_reports_export(
     )
 
 
+@router.get("/communities/{community_id}/units/detailed", response_model=CommunityUnitsDetailedResponse)
+def community_units_detailed(
+    community_id: str,
+    offset: int = 0,
+    limit: int = 20,
+    include_simulation: bool | None = None,
+    period: str = "all",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    limit = _validate_pagination(offset, limit)
+    try:
+        _, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+
+    units_q = db.execute(
+        select(Unit).where(Unit.community_id == community_id).order_by(Unit.unit_id).offset(offset).limit(limit)
+    ).scalars().all()
+    total = int(db.execute(select(func.count(Unit.id)).where(Unit.community_id == community_id)).scalar_one())
+    ai_row = get_latest_ai_result(db, community_id)
+    rec_map = recommendations_map_by_unit(parse_recommendations(ai_row))
+
+    items: list[UnitDetailedItem] = []
+    for unit in units_q:
+        cond = _unit_conditions(community_id, unit.unit_id, resolved_include_sim, period_start, period_end)
+        total_kwh, total_cost, last_seen = db.execute(
+            select(
+                func.coalesce(func.sum(EnergyReading.kwh), 0.0),
+                func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0),
+                func.max(EnergyReading.timestamp),
+            ).where(and_(*cond))
+        ).one()
+        peak = db.execute(
+            select(func.coalesce(func.max(EnergyReading.kwh), 0.0)).where(and_(*cond))
+        ).scalar_one()
+        devices_count = int(db.execute(select(func.count(Device.id)).where(Device.unit_id == unit.id)).scalar_one())
+        owner_row = db.execute(
+            select(User.user_id, User.full_name)
+            .where(and_(User.community_id == community_id, User.unit_id == unit.unit_id, User.is_deleted.is_(False)))
+            .order_by(User.user_id.asc())
+        ).first()
+        owner = UnitDetailedOwner(user_id=owner_row.user_id, full_name=owner_row.full_name) if owner_row else None
+        unit_recs = rec_map.get(unit.unit_id, [])
+        rec_payload = unit_recs[0].model_dump() if unit_recs else {}
+        risk_level = QueryService.risk_label(float(peak))
+        status = "offline"
+        if QueryService.freshness(last_seen):
+            status = "normal" if risk_level == "normal" else "warning"
+        items.append(
+            UnitDetailedItem(
+                unit_id=unit.unit_id,
+                owner=owner,
+                consumption=UnitDetailedConsumption(
+                    total_kwh=float(total_kwh),
+                    estimated_cost=float(total_cost),
+                    estimated_emission_kg_co2e=QueryService.emission(float(total_kwh)),
+                ),
+                devices_count=devices_count,
+                risk=UnitDetailedRisk(peak_kwh=float(peak), risk_level=risk_level),
+                recommendation=rec_payload,
+                last_seen=last_seen,
+                status=status,
+            )
+        )
+    return CommunityUnitsDetailedResponse(items=items, meta=_meta(total, offset, limit))
+
+
+@router.get("/communities/{community_id}/residents/detailed", response_model=CommunityResidentsDetailedResponse)
+def community_residents_detailed(
+    community_id: str,
+    offset: int = 0,
+    limit: int = 20,
+    include_simulation: bool | None = None,
+    period: str = "all",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    limit = _validate_pagination(offset, limit)
+    try:
+        _, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+
+    users = db.execute(
+        select(User)
+        .where(and_(User.community_id == community_id, User.is_deleted.is_(False)))
+        .order_by(User.user_id)
+        .offset(offset)
+        .limit(limit)
+    ).scalars().all()
+    total = int(
+        db.execute(
+            select(func.count(User.id)).where(and_(User.community_id == community_id, User.is_deleted.is_(False)))
+        ).scalar_one()
+    )
+    items: list[ResidentDetailedItem] = []
+    for user in users:
+        unit_id = user.unit_id
+        total_kwh = 0.0
+        total_cost = 0.0
+        peak = 0.0
+        if unit_id:
+            cond = _unit_conditions(community_id, unit_id, resolved_include_sim, period_start, period_end)
+            total_kwh, total_cost = db.execute(
+                select(
+                    func.coalesce(func.sum(EnergyReading.kwh), 0.0),
+                    func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0),
+                ).where(and_(*cond))
+            ).one()
+            peak = float(db.execute(select(func.coalesce(func.max(EnergyReading.kwh), 0.0)).where(and_(*cond))).scalar_one())
+        notif_count = int(
+            db.execute(select(func.count(Notification.id)).where(Notification.community_id == community_id)).scalar_one()
+        )
+        notif_read = int(
+            db.execute(select(func.count(NotificationRead.id)).where(NotificationRead.user_id == user.user_id)).scalar_one()
+        )
+        cmd_count = int(
+            db.execute(
+                select(func.count(DeviceCommand.id)).where(
+                    and_(DeviceCommand.community_id == community_id, DeviceCommand.created_by_user_id == user.user_id)
+                )
+            ).scalar_one()
+        )
+        last_cmd = db.execute(
+            select(func.max(DeviceCommand.created_at)).where(
+                and_(DeviceCommand.community_id == community_id, DeviceCommand.created_by_user_id == user.user_id)
+            )
+        ).scalar_one_or_none()
+        items.append(
+            ResidentDetailedItem(
+                user=ResidentDetailedUser(
+                    user_id=user.user_id,
+                    full_name=user.full_name,
+                    role=user.role.value,
+                    status=user.status.value,
+                ),
+                unit=ResidentDetailedUnit(unit_id=unit_id),
+                consumption=UnitDetailedConsumption(
+                    total_kwh=float(total_kwh),
+                    estimated_cost=float(total_cost),
+                    estimated_emission_kg_co2e=QueryService.emission(float(total_kwh)),
+                ),
+                risk=UnitDetailedRisk(peak_kwh=float(peak), risk_level=QueryService.risk_label(float(peak))),
+                interaction_metadata=ResidentInteractionMetadata(
+                    command_count=cmd_count,
+                    notification_read_count=notif_read,
+                    notification_count=notif_count,
+                    last_interaction_at=last_cmd,
+                ),
+            )
+        )
+    return CommunityResidentsDetailedResponse(items=items, meta=_meta(total, offset, limit))
+
+
+@router.get("/communities/{community_id}/reports/history", response_model=CommunityReportHistoryResponse)
+def community_reports_history(
+    community_id: str,
+    offset: int = 0,
+    limit: int = 12,
+    include_simulation: bool | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit must be >= 1")
+    limit = min(limit, 60)
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+    month_expr = func.to_char(EnergyReading.timestamp, "YYYY-MM")
+    cond = _community_conditions(community_id, resolved_include_sim)
+    grouped = (
+        select(
+            month_expr.label("period"),
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+            func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0).label("estimated_cost"),
+            func.max(EnergyReading.timestamp).label("last_timestamp"),
+        )
+        .where(and_(*cond))
+        .group_by(month_expr)
+    ).subquery()
+    total = int(db.execute(select(func.count()).select_from(grouped)).scalar_one())
+    rows = db.execute(
+        select(grouped.c.period, grouped.c.total_kwh, grouped.c.estimated_cost, grouped.c.last_timestamp)
+        .order_by(grouped.c.period.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    items = [
+        CommunityReportHistoryItem(
+            period=r.period,
+            total_kwh=float(r.total_kwh or 0.0),
+            estimated_cost=float(r.estimated_cost or 0.0),
+            estimated_emission_kg_co2e=QueryService.emission(float(r.total_kwh or 0.0)),
+            last_timestamp=r.last_timestamp,
+            is_fresh=QueryService.freshness(r.last_timestamp),
+        )
+        for r in rows
+    ]
+    return CommunityReportHistoryResponse(items=items, meta=_meta(total, offset, limit))
+
+
+@router.get("/communities/{community_id}/consumption/daily", response_model=CommunityDailyConsumptionResponse)
+def community_consumption_daily(
+    community_id: str,
+    days: int = 30,
+    include_simulation: bool | None = None,
+    period: str = "all",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    days = _validate_days(days)
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+    now = utc_now()
+    days_start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    effective_start = days_start if not period_start else max(days_start, period_start)
+    effective_end = period_end or now
+    cond = _community_conditions(community_id, resolved_include_sim, effective_start, effective_end)
+    rows = db.execute(
+        select(
+            func.date(EnergyReading.timestamp).label("day"),
+            func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+            func.coalesce(func.sum(EnergyReading.estimated_cost), 0.0).label("estimated_cost"),
+        )
+        .where(and_(*cond))
+        .group_by(func.date(EnergyReading.timestamp))
+        .order_by(func.date(EnergyReading.timestamp))
+    ).all()
+    last_timestamp = db.execute(select(func.max(EnergyReading.timestamp)).where(and_(*cond))).scalar_one_or_none()
+    series = [
+        CommunityDailyConsumptionPoint(
+            date=str(r.day),
+            total_kwh=float(r.total_kwh or 0.0),
+            estimated_cost=float(r.estimated_cost or 0.0),
+            estimated_emission_kg_co2e=QueryService.emission(float(r.total_kwh or 0.0)),
+        )
+        for r in rows
+    ]
+    return CommunityDailyConsumptionResponse(
+        community_id=community_id,
+        series=series,
+        period_used=period_used,
+        period_start=period_start,
+        last_timestamp=last_timestamp,
+        is_fresh=QueryService.freshness(last_timestamp),
+    )
+
+
+@router.get("/communities/{community_id}/settings", response_model=CommunitySettingsResponse)
+def get_community_settings(
+    community_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    if current_user.role not in [UserRole.ADMIN, UserRole.COORDINATOR]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    row = db.execute(select(CommunitySetting).where(CommunitySetting.community_id == community_id)).scalar_one_or_none()
+    defaults = _community_settings_defaults()
+    if not row:
+        return CommunitySettingsResponse(
+            community_id=community_id,
+            tariff=defaults["tariff"],
+            emission_factor=defaults["emission_factor"],
+            thresholds=defaults["thresholds"],
+            notification_config=defaults["notification_config"],
+            updated_at=None,
+        )
+    return CommunitySettingsResponse(
+        community_id=community_id,
+        tariff=row.tariff,
+        emission_factor=row.emission_factor,
+        thresholds=row.thresholds or defaults["thresholds"],
+        notification_config=row.notification_config or defaults["notification_config"],
+        updated_at=row.updated_at,
+    )
+
+
+@router.put("/communities/{community_id}/settings", response_model=CommunitySettingsResponse)
+def put_community_settings(
+    community_id: str,
+    payload: CommunitySettingsUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    if current_user.role not in [UserRole.ADMIN, UserRole.COORDINATOR]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    row = db.execute(select(CommunitySetting).where(CommunitySetting.community_id == community_id)).scalar_one_or_none()
+    defaults = _community_settings_defaults()
+    if not row:
+        row = CommunitySetting(
+            community_id=community_id,
+            tariff=defaults["tariff"],
+            emission_factor=defaults["emission_factor"],
+            thresholds=defaults["thresholds"],
+            notification_config=defaults["notification_config"],
+        )
+        db.add(row)
+        db.flush()
+    if payload.tariff is not None:
+        row.tariff = payload.tariff
+    if payload.emission_factor is not None:
+        row.emission_factor = payload.emission_factor
+    if payload.thresholds is not None:
+        row.thresholds = payload.thresholds.model_dump()
+    if payload.notification_config is not None:
+        row.notification_config = payload.notification_config.model_dump()
+    db.commit()
+    db.refresh(row)
+    return CommunitySettingsResponse(
+        community_id=community_id,
+        tariff=row.tariff,
+        emission_factor=row.emission_factor,
+        thresholds=row.thresholds or defaults["thresholds"],
+        notification_config=row.notification_config or defaults["notification_config"],
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/users/{user_id}/notification-preferences", response_model=UserNotificationPreferencesResponse)
+def get_user_notification_preferences(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != UserRole.ADMIN and current_user.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    user = db.execute(select(User).where(User.user_id == user_id)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Not found")
+    row = db.execute(
+        select(UserNotificationPreference).where(UserNotificationPreference.user_id == user_id)
+    ).scalar_one_or_none()
+    return UserNotificationPreferencesResponse(
+        user_id=user_id,
+        preferences=row.preferences if row else {},
+        updated_at=row.updated_at if row else None,
+    )
+
+
+@router.put("/users/{user_id}/notification-preferences", response_model=UserNotificationPreferencesResponse)
+def put_user_notification_preferences(
+    user_id: str,
+    payload: UserNotificationPreferencesUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != UserRole.ADMIN and current_user.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    user = db.execute(select(User).where(User.user_id == user_id)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Not found")
+    row = db.execute(
+        select(UserNotificationPreference).where(UserNotificationPreference.user_id == user_id)
+    ).scalar_one_or_none()
+    if not row:
+        row = UserNotificationPreference(user_id=user_id, preferences=payload.preferences)
+        db.add(row)
+    else:
+        row.preferences = payload.preferences
+    db.commit()
+    db.refresh(row)
+    return UserNotificationPreferencesResponse(user_id=user_id, preferences=row.preferences, updated_at=row.updated_at)
+
+
+@router.get("/communities/{community_id}/optimization-simulation", response_model=OptimizationSimulationResponse)
+def community_optimization_simulation(
+    community_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_community_access(community_id, current_user)
+    ai_row = get_latest_ai_result(db, community_id)
+    if not ai_row:
+        return OptimizationSimulationResponse(community_id=community_id, exists=False, analyzed_at=None, summary=OptimizationSimulationSummary(), scenarios=[])
+    recs = parse_recommendations(ai_row)
+    current_kwh = float(
+        db.execute(
+            select(func.coalesce(func.sum(EnergyReading.kwh), 0.0)).where(EnergyReading.community_id == community_id)
+        ).scalar_one()
+    )
+    potential_reduction = sum(float(item.estimated_reduction_kwh or 0.0) for item in recs)
+    community_setting = db.execute(
+        select(CommunitySetting).where(CommunitySetting.community_id == community_id)
+    ).scalar_one_or_none()
+    tariff_value = community_setting.tariff if community_setting else 1444.7
+    potential_cost_saving = potential_reduction * float(tariff_value)
+    potential_emission_reduction = QueryService.emission(potential_reduction)
+    scenarios = [item.model_dump() for item in recs[:10]]
+    return OptimizationSimulationResponse(
+        community_id=community_id,
+        exists=True,
+        analyzed_at=ai_row.analyzed_at,
+        summary=OptimizationSimulationSummary(
+            current_kwh=current_kwh,
+            potential_reduction_kwh=potential_reduction,
+            potential_cost_saving=potential_cost_saving,
+            potential_emission_reduction_kg_co2e=potential_emission_reduction,
+        ),
+        scenarios=scenarios,
+    )
+
+
 @router.get("/devices", response_model=DeviceCatalogListResponse)
 def list_global_devices(
     offset: int = 0,
@@ -1859,7 +2567,15 @@ def unit_device_create(
     exists = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == payload.device_id))).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=400, detail="Device already exists on this unit")
-    row = Device(unit_id=unit.id, device_id=payload.device_id, qty=payload.qty, controllable=payload.controllable, schedules=payload.schedules)
+    row = Device(
+        unit_id=unit.id,
+        device_id=payload.device_id,
+        qty=payload.qty,
+        is_active=payload.is_active,
+        schedule_source="manual" if payload.schedules is not None else "mqtt",
+        controllable=payload.controllable,
+        schedules=payload.schedules,
+    )
     db.add(row)
     db.commit()
     name_map = _resolve_device_names(db, [row.device_id])
@@ -1879,12 +2595,22 @@ def unit_device_update(
     row = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == device_id))).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
+    if (
+        payload.qty is None
+        and payload.is_active is None
+        and payload.controllable is None
+        and payload.schedules is None
+    ):
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
     if payload.qty is not None:
         row.qty = payload.qty
+    if payload.is_active is not None:
+        row.is_active = payload.is_active
     if payload.controllable is not None:
         row.controllable = payload.controllable
     if payload.schedules is not None:
         row.schedules = payload.schedules
+        row.schedule_source = "manual"
     db.commit()
     name_map = _resolve_device_names(db, [row.device_id])
     return _to_unit_device_response(row, name_map.get(row.device_id, row.device_id))
@@ -1920,6 +2646,8 @@ def unit_device_control(
     row = db.execute(select(Device).where(and_(Device.unit_id == unit.id, Device.device_id == device_id))).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
+    if not row.is_active:
+        raise HTTPException(status_code=400, detail="Device is inactive")
     if not row.controllable:
         raise HTTPException(status_code=400, detail="Device is not controllable")
 
