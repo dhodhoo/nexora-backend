@@ -43,6 +43,8 @@ from app.schemas import (
     CommunitySimulationStateResponse,
     CommunitySimulationToggleRequest,
     CommunityUnitsDetailedResponse,
+    CommunityUnitsBaselineResponse,
+    CommunityUnitsPeakRiskResponse,
     CommunityResidentsDetailedResponse,
     ResidentDetailedItem,
     ResidentDetailedUnit,
@@ -107,6 +109,8 @@ from app.schemas import (
     UnitSummaryResponse,
     UnitUpdateRequest,
     UnitVaUpdateRequest,
+    UnitBaselineItem,
+    UnitPeakRiskItem,
     UserCreateRequest,
     UserResponse,
     UsersListResponse,
@@ -1874,6 +1878,154 @@ def community_units_summary(
         period_start=period_start,
         period_end=period_end,
         period_used=period_used,
+    )
+
+
+@router.get("/communities/{community_id}/units-baseline", response_model=CommunityUnitsBaselineResponse)
+def community_units_baseline(
+    community_id: str,
+    include_simulation: bool | None = None,
+    period: str = "all",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    ensure_community_access(community_id, current_user)
+    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community:
+        raise HTTPException(status_code=404, detail="Not found")
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+
+    if period_used == "all":
+        effective_start = utc_now() - timedelta(days=settings.nexora_history_window_days)
+        effective_end = utc_now()
+    else:
+        effective_start = period_start or (utc_now() - timedelta(days=settings.nexora_history_window_days))
+        effective_end = period_end or utc_now()
+
+    units = db.execute(
+        select(Unit).where(Unit.community_id == community_id).order_by(Unit.unit_id)
+    ).scalars().all()
+    unit_ids = [unit.unit_id for unit in units]
+    if not unit_ids:
+        return CommunityUnitsBaselineResponse(
+            community_id=community_id,
+            period_used=period_used,
+            period_start=period_start,
+            items=[],
+        )
+
+    conditions = [
+        EnergyReading.community_id == community_id,
+        EnergyReading.unit_id.in_(unit_ids),
+        EnergyReading.timestamp >= effective_start.replace(tzinfo=None),
+        EnergyReading.timestamp <= effective_end.replace(tzinfo=None),
+    ]
+    if not resolved_include_sim:
+        conditions.append(EnergyReading.is_simulation.is_(False))
+
+    rows = db.execute(
+        select(EnergyReading.unit_id, EnergyReading.kwh)
+        .where(and_(*conditions))
+        .order_by(EnergyReading.unit_id.asc(), EnergyReading.timestamp.desc())
+    ).all()
+
+    values_by_unit: dict[str, list[float]] = {unit_id: [] for unit_id in unit_ids}
+    for unit_id, kwh in rows:
+        if unit_id in values_by_unit:
+            values_by_unit[unit_id].append(float(kwh))
+
+    short_window = max(1, settings.nexora_baseline_short_window)
+    long_window = max(1, settings.nexora_baseline_long_window)
+    short_weight = settings.nexora_baseline_short_weight
+    long_weight = settings.nexora_baseline_long_weight
+
+    def _avg(nums: list[float]) -> float:
+        return (sum(nums) / len(nums)) if nums else 0.0
+
+    items: list[UnitBaselineItem] = []
+    for unit in units:
+        samples = values_by_unit.get(unit.unit_id, [])
+        if not samples:
+            baseline = 0.0
+        else:
+            short = _avg(samples[:short_window])
+            long = _avg(samples[:long_window])
+            baseline = (short * short_weight) + (long * long_weight)
+        items.append(UnitBaselineItem(unit_id=unit.unit_id, baseline_unit_kwh=round(float(baseline), 4)))
+
+    return CommunityUnitsBaselineResponse(
+        community_id=community_id,
+        period_used=period_used,
+        period_start=period_start,
+        items=items,
+    )
+
+
+@router.get("/communities/{community_id}/units-peak-risk", response_model=CommunityUnitsPeakRiskResponse)
+def community_units_peak_risk(
+    community_id: str,
+    include_simulation: bool | None = None,
+    period: str = "all",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        period_used, period_start, period_end = resolve_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    ensure_community_access(community_id, current_user)
+    community = db.execute(select(Community).where(Community.community_id == community_id)).scalar_one_or_none()
+    if not community:
+        raise HTTPException(status_code=404, detail="Not found")
+    resolved_include_sim = _resolve_include_simulation(db, community_id, current_user, include_simulation)
+
+    units = db.execute(select(Unit).where(Unit.community_id == community_id).order_by(Unit.unit_id)).scalars().all()
+    items: list[UnitPeakRiskItem] = []
+    for unit in units:
+        conditions = [EnergyReading.community_id == community_id, EnergyReading.unit_id == unit.unit_id]
+        if period_start:
+            conditions.append(EnergyReading.timestamp >= period_start.replace(tzinfo=None))
+        if period_end:
+            conditions.append(EnergyReading.timestamp <= period_end.replace(tzinfo=None))
+        if not resolved_include_sim:
+            conditions.append(EnergyReading.is_simulation.is_(False))
+
+        bucket_expr = func.to_char(func.date_trunc("hour", EnergyReading.timestamp), "YYYY-MM-DD\"T\"HH24:00:00")
+        peak_row = db.execute(
+            select(
+                bucket_expr.label("bucket"),
+                func.coalesce(func.sum(EnergyReading.kwh), 0.0).label("total_kwh"),
+            )
+            .where(and_(*conditions))
+            .group_by(bucket_expr)
+            .order_by(desc("total_kwh"))
+        ).first()
+        last_timestamp = db.execute(
+            select(func.max(EnergyReading.timestamp)).where(and_(*conditions))
+        ).scalar_one_or_none()
+        peak_kwh = float(peak_row.total_kwh) if peak_row else 0.0
+        items.append(
+            UnitPeakRiskItem(
+                unit_id=unit.unit_id,
+                peak_hour=(peak_row.bucket if peak_row else None),
+                peak_kwh=peak_kwh,
+                risk_level=QueryService.risk_label(peak_kwh),
+                last_timestamp=last_timestamp,
+                is_fresh=QueryService.freshness(last_timestamp),
+            )
+        )
+
+    return CommunityUnitsPeakRiskResponse(
+        community_id=community_id,
+        period_used=period_used,
+        period_start=period_start,
+        items=items,
     )
 
 

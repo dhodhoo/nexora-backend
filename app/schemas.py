@@ -139,6 +139,34 @@ class CommunityUnitSummaryItem(BaseModel):
     recommendation_compliance: RecommendationCompliance = Field(default_factory=RecommendationCompliance)
 
 
+class UnitBaselineItem(BaseModel):
+    unit_id: str
+    baseline_unit_kwh: float
+
+
+class CommunityUnitsBaselineResponse(BaseModel):
+    community_id: str
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    items: List[UnitBaselineItem] = Field(default_factory=list)
+
+
+class UnitPeakRiskItem(BaseModel):
+    unit_id: str
+    peak_hour: Optional[str]
+    peak_kwh: float
+    risk_level: str
+    last_timestamp: Optional[datetime]
+    is_fresh: bool
+
+
+class CommunityUnitsPeakRiskResponse(BaseModel):
+    community_id: str
+    period_used: str = "all"
+    period_start: Optional[datetime] = None
+    items: List[UnitPeakRiskItem] = Field(default_factory=list)
+
+
 class AIStatusResponse(BaseModel):
     community_id: str
     exists: bool

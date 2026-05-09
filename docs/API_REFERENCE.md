@@ -1202,6 +1202,62 @@ Response `200`:
 ]
 ```
 
+#### `GET /communities/{community_id}/units-baseline`
+- Tujuan: ambil baseline `kWh` semua unit dalam komunitas (anti N+1 untuk FE thresholding).
+- Auth: Protected (scope check community).
+- Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
+
+Response `200`:
+```json
+{
+  "community_id": "C01",
+  "period_used": "all",
+  "period_start": null,
+  "items": [
+    {
+      "unit_id": "U01",
+      "baseline_unit_kwh": 1.2345
+    },
+    {
+      "unit_id": "U02",
+      "baseline_unit_kwh": 0.0
+    }
+  ]
+}
+```
+
+#### `GET /communities/{community_id}/units-peak-risk`
+- Tujuan: ambil jam rawan (peak hour) per unit dalam satu call (anti N+1 FE).
+- Auth: Protected (scope check community).
+- Query opsional: `include_simulation=true|false`, `period=all|month|week` (default `all`).
+
+Response `200`:
+```json
+{
+  "community_id": "C01",
+  "period_used": "week",
+  "period_start": "2026-05-04T00:00:00+00:00",
+  "items": [
+    {
+      "unit_id": "U01",
+      "peak_hour": "2026-05-08T20:00:00",
+      "peak_kwh": 1.92,
+      "risk_level": "high",
+      "last_timestamp": "2026-05-09T03:00:00",
+      "is_fresh": true
+    },
+    {
+      "unit_id": "U02",
+      "peak_hour": null,
+      "peak_kwh": 0.0,
+      "risk_level": "normal",
+      "last_timestamp": null,
+      "is_fresh": false
+    }
+  ]
+}
+```
+
 #### `GET /communities/{community_id}/dashboard`
 - Tujuan: payload dashboard tunggal.
 - Auth: Protected (scope check community).

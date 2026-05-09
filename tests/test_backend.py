@@ -773,6 +773,195 @@ def test_community_units_summary():
         assert any(r["unit_id"] == "U01" for r in rows)
 
 
+def test_community_units_baseline_contract_and_all_units_covered():
+    db = SessionLocal()
+    community = db.query(Community).filter(Community.community_id == "CBL").first()
+    if not community:
+        db.add(Community(community_id="CBL", name="Baseline Community"))
+        db.flush()
+    if not db.query(Unit).filter(Unit.community_id == "CBL", Unit.unit_id == "UB01").first():
+        db.add(Unit(community_id="CBL", unit_id="UB01", va=1300))
+    if not db.query(Unit).filter(Unit.community_id == "CBL", Unit.unit_id == "UB02").first():
+        db.add(Unit(community_id="CBL", unit_id="UB02", va=1300))
+    db.commit()
+    db.close()
+
+    # Seed readings only for UB01, UB02 intentionally left without samples.
+    now = utc_now().replace(minute=0, second=0, microsecond=0)
+    for i in range(8):
+        ts = now - timedelta(hours=i)
+        payload = {
+            "community_id": "CBL",
+            "unit_id": "UB01",
+            "device_id": "ac",
+            "timestamp": ts.isoformat(),
+            "kwh": 1.0 + (i * 0.1),
+            "controllable": True,
+        }
+        db = SessionLocal()
+        IngestionService.ingest_event(db, payload, "energy/CBL/UB01/consumption")
+        db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.get("/communities/CBL/units-baseline", headers=headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["community_id"] == "CBL"
+        assert body["period_used"] == "all"
+        assert "period_start" in body
+        assert "items" in body
+        by_unit = {item["unit_id"]: item for item in body["items"]}
+        assert {"UB01", "UB02"}.issubset(set(by_unit.keys()))
+        assert by_unit["UB01"]["baseline_unit_kwh"] > 0
+        assert by_unit["UB02"]["baseline_unit_kwh"] == 0.0
+
+
+def test_community_units_baseline_period_and_invalid_period():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CBL2").first():
+        db.add(Community(community_id="CBL2", name="Baseline Community 2"))
+    if not db.query(Unit).filter(Unit.community_id == "CBL2", Unit.unit_id == "UB201").first():
+        db.add(Unit(community_id="CBL2", unit_id="UB201", va=1300))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        ok = client.get("/communities/CBL2/units-baseline", params={"period": "week"}, headers=headers)
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body["period_used"] == "week"
+        assert body["period_start"] is not None
+
+        bad = client.get("/communities/CBL2/units-baseline", params={"period": "weekly"}, headers=headers)
+        assert bad.status_code == 400
+
+
+def test_community_units_baseline_scope_forbidden_and_not_found():
+    with TestClient(app) as client:
+        admin_headers = _auth_headers(client)
+        create = client.post(
+            "/users",
+            json={
+                "user_id": "coord-baseline",
+                "full_name": "Coordinator Baseline",
+                "email": "coord-baseline@nexora.local",
+                "password": "coord12345",
+                "role": "ROLE_COORDINATOR",
+                "status": "ACTIVE",
+            },
+            headers=admin_headers,
+        )
+        assert create.status_code in (200, 400)
+        assign = client.put(
+            "/users/coord-baseline",
+            json={"community_id": "C02", "status": "ACTIVE"},
+            headers=admin_headers,
+        )
+        assert assign.status_code == 200
+
+        login = client.post("/auth/login", json={"email": "coord-baseline@nexora.local", "password": "coord12345"})
+        assert login.status_code == 200
+        coord_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        forbidden = client.get("/communities/C01/units-baseline", headers=coord_headers)
+        assert forbidden.status_code == 403
+
+        not_found = client.get("/communities/NOPE/units-baseline", headers=admin_headers)
+        assert not_found.status_code == 404
+
+
+def test_community_units_peak_risk_contract_and_fallback():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CPK").first():
+        db.add(Community(community_id="CPK", name="Peak Community"))
+    if not db.query(Unit).filter(Unit.community_id == "CPK", Unit.unit_id == "UPK1").first():
+        db.add(Unit(community_id="CPK", unit_id="UPK1", va=1300))
+    if not db.query(Unit).filter(Unit.community_id == "CPK", Unit.unit_id == "UPK2").first():
+        db.add(Unit(community_id="CPK", unit_id="UPK2", va=1300))
+    db.commit()
+    db.close()
+
+    now = utc_now().replace(minute=0, second=0, microsecond=0)
+    payloads = [
+        {"community_id": "CPK", "unit_id": "UPK1", "device_id": "ac", "timestamp": (now - timedelta(hours=2)).isoformat(), "kwh": 1.0, "controllable": True},
+        {"community_id": "CPK", "unit_id": "UPK1", "device_id": "ac", "timestamp": (now - timedelta(hours=1)).isoformat(), "kwh": 2.0, "controllable": True},
+    ]
+    for payload in payloads:
+        db = SessionLocal()
+        IngestionService.ingest_event(db, payload, "energy/CPK/UPK1/consumption")
+        db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        res = client.get("/communities/CPK/units-peak-risk", headers=headers)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["community_id"] == "CPK"
+        assert body["period_used"] == "all"
+        by_unit = {item["unit_id"]: item for item in body["items"]}
+        assert {"UPK1", "UPK2"}.issubset(set(by_unit.keys()))
+        assert by_unit["UPK1"]["peak_kwh"] >= 2.0
+        assert by_unit["UPK1"]["peak_hour"] is not None
+        assert by_unit["UPK2"]["peak_kwh"] == 0.0
+        assert by_unit["UPK2"]["peak_hour"] is None
+        assert by_unit["UPK2"]["risk_level"] == "normal"
+        assert by_unit["UPK2"]["is_fresh"] is False
+
+
+def test_community_units_peak_risk_period_and_invalid_period():
+    db = SessionLocal()
+    if not db.query(Community).filter(Community.community_id == "CPK2").first():
+        db.add(Community(community_id="CPK2", name="Peak Community 2"))
+    if not db.query(Unit).filter(Unit.community_id == "CPK2", Unit.unit_id == "UPK201").first():
+        db.add(Unit(community_id="CPK2", unit_id="UPK201", va=1300))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        ok = client.get("/communities/CPK2/units-peak-risk", params={"period": "week"}, headers=headers)
+        assert ok.status_code == 200
+        assert ok.json()["period_used"] == "week"
+        bad = client.get("/communities/CPK2/units-peak-risk", params={"period": "weekly"}, headers=headers)
+        assert bad.status_code == 400
+
+
+def test_community_units_peak_risk_scope_forbidden_and_not_found():
+    with TestClient(app) as client:
+        admin_headers = _auth_headers(client)
+        create = client.post(
+            "/users",
+            json={
+                "user_id": "coord-peak",
+                "full_name": "Coordinator Peak",
+                "email": "coord-peak@nexora.local",
+                "password": "coord12345",
+                "role": "ROLE_COORDINATOR",
+                "status": "ACTIVE",
+            },
+            headers=admin_headers,
+        )
+        assert create.status_code in (200, 400)
+        assign = client.put(
+            "/users/coord-peak",
+            json={"community_id": "C02", "status": "ACTIVE"},
+            headers=admin_headers,
+        )
+        assert assign.status_code == 200
+
+        login = client.post("/auth/login", json={"email": "coord-peak@nexora.local", "password": "coord12345"})
+        assert login.status_code == 200
+        coord_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        forbidden = client.get("/communities/C01/units-peak-risk", headers=coord_headers)
+        assert forbidden.status_code == 403
+
+        not_found = client.get("/communities/NOPE/units-peak-risk", headers=admin_headers)
+        assert not_found.status_code == 404
+
+
 def test_advanced_list_communities_contract_and_filter():
     with TestClient(app) as client:
         headers = _auth_headers(client)

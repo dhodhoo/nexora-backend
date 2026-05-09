@@ -40,6 +40,8 @@ Catatan bootstrap auth:
 14. `GET /communities/{community_id}/settings`
 15. `PUT /communities/{community_id}/settings`
 16. `GET /communities/{community_id}/optimization-simulation`
+17. `GET /communities/{community_id}/units-baseline`
+18. `GET /communities/{community_id}/units-peak-risk`
 - Untuk analytics periodik, endpoint dashboard/summary mendukung query `period=all|month|week` (default `all`).
 - Untuk `period=month|week`, response juga menyertakan blok `comparison` (persen konsumsi/tagihan/emisi vs periode sebelumnya). Jika periode sebelumnya nol, nilai persen akan `null`.
 - Semua endpoint analytics utama juga menyertakan blok `recommendation_compliance`:
@@ -128,6 +130,28 @@ Field wajib:
 - `device_emissions[].device_name`
 - `device_emissions[].total_kwh`
 - `device_emissions[].estimated_emission_kg_co2e`
+
+### `/communities/{community_id}/units-baseline`
+Field wajib:
+- `community_id`
+- `period_used`
+- `period_start`
+- `items[]`
+- `items[].unit_id`
+- `items[].baseline_unit_kwh`
+
+### `/communities/{community_id}/units-peak-risk`
+Field wajib:
+- `community_id`
+- `period_used`
+- `period_start`
+- `items[]`
+- `items[].unit_id`
+- `items[].peak_hour`
+- `items[].peak_kwh`
+- `items[].risk_level`
+- `items[].last_timestamp`
+- `items[].is_fresh`
 
 ### `/units/{unit_id}/emissions/daily`
 Field wajib:
